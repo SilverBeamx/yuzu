@@ -10,6 +10,7 @@
 #include "common/file_util.h"
 #include "common/hex_util.h"
 #include "common/logging/log.h"
+#include "common/string_util.h"
 #include "core/core.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/control_metadata.h"
@@ -46,6 +47,23 @@ std::string FormatTitleVersion(u32 version, TitleVersionFormat format) {
     if (format == TitleVersionFormat::FourElements)
         return fmt::format("v{}.{}.{}.{}", bytes[3], bytes[2], bytes[1], bytes[0]);
     return fmt::format("v{}.{}.{}", bytes[3], bytes[2], bytes[1]);
+}
+
+std::shared_ptr<VfsDirectory> FindSubdirectoryCaseless(const std::shared_ptr<VfsDirectory> dir,
+                                                       std::string_view name) {
+#ifdef _WIN32
+    return dir->GetSubdirectory(name);
+#else
+    const auto subdirs = dir->GetSubdirectories();
+    for (const auto& subdir : subdirs) {
+        std::string dir_name = Common::ToLower(subdir->GetName());
+        if (dir_name == name) {
+            return subdir;
+        }
+    }
+
+    return nullptr;
+#endif
 }
 
 PatchManager::PatchManager(u64 title_id) : title_id(title_id) {}
@@ -104,7 +122,7 @@ VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
             if (std::find(disabled.begin(), disabled.end(), subdir->GetName()) != disabled.end())
                 continue;
 
-            auto exefs_dir = subdir->GetSubdirectory("exefs");
+            auto exefs_dir = FindSubdirectoryCaseless(subdir, "exefs");
             if (exefs_dir != nullptr)
                 layers.push_back(std::move(exefs_dir));
         }
@@ -130,7 +148,7 @@ std::vector<VirtualFile> PatchManager::CollectPatches(const std::vector<VirtualD
         if (std::find(disabled.cbegin(), disabled.cend(), subdir->GetName()) != disabled.cend())
             continue;
 
-        auto exefs_dir = subdir->GetSubdirectory("exefs");
+        auto exefs_dir = FindSubdirectoryCaseless(subdir, "exefs");
         if (exefs_dir != nullptr) {
             for (const auto& file : exefs_dir->GetFiles()) {
                 if (file->GetExtension() == "ips") {
@@ -249,7 +267,7 @@ bool PatchManager::HasNSOPatch(const std::array<u8, 32>& build_id_) const {
 }
 
 namespace {
-std::optional<std::vector<Memory::CheatEntry>> ReadCheatFileFromFolder(
+std::optional<std::vector<Core::Memory::CheatEntry>> ReadCheatFileFromFolder(
     const Core::System& system, u64 title_id, const std::array<u8, 0x20>& build_id_,
     const VirtualDir& base_path, bool upper) {
     const auto build_id_raw = Common::HexToString(build_id_, upper);
@@ -269,14 +287,14 @@ std::optional<std::vector<Memory::CheatEntry>> ReadCheatFileFromFolder(
         return std::nullopt;
     }
 
-    Memory::TextCheatParser parser;
+    Core::Memory::TextCheatParser parser;
     return parser.Parse(
         system, std::string_view(reinterpret_cast<const char* const>(data.data()), data.size()));
 }
 
 } // Anonymous namespace
 
-std::vector<Memory::CheatEntry> PatchManager::CreateCheatList(
+std::vector<Core::Memory::CheatEntry> PatchManager::CreateCheatList(
     const Core::System& system, const std::array<u8, 32>& build_id_) const {
     const auto load_dir = system.GetFileSystemController().GetModificationLoadRoot(title_id);
     if (load_dir == nullptr) {
@@ -289,13 +307,13 @@ std::vector<Memory::CheatEntry> PatchManager::CreateCheatList(
     std::sort(patch_dirs.begin(), patch_dirs.end(),
               [](const VirtualDir& l, const VirtualDir& r) { return l->GetName() < r->GetName(); });
 
-    std::vector<Memory::CheatEntry> out;
+    std::vector<Core::Memory::CheatEntry> out;
     for (const auto& subdir : patch_dirs) {
         if (std::find(disabled.cbegin(), disabled.cend(), subdir->GetName()) != disabled.cend()) {
             continue;
         }
 
-        auto cheats_dir = subdir->GetSubdirectory("cheats");
+        auto cheats_dir = FindSubdirectoryCaseless(subdir, "cheats");
         if (cheats_dir != nullptr) {
             auto res = ReadCheatFileFromFolder(system, title_id, build_id_, cheats_dir, true);
             if (res.has_value()) {
@@ -340,14 +358,20 @@ static void ApplyLayeredFS(VirtualFile& romfs, u64 title_id, ContentRecordType t
             continue;
         }
 
-        auto romfs_dir = subdir->GetSubdirectory("romfs");
+        auto romfs_dir = FindSubdirectoryCaseless(subdir, "romfs");
         if (romfs_dir != nullptr)
             layers.push_back(std::move(romfs_dir));
 
-        auto ext_dir = subdir->GetSubdirectory("romfs_ext");
+        auto ext_dir = FindSubdirectoryCaseless(subdir, "romfs_ext");
         if (ext_dir != nullptr)
             layers_ext.push_back(std::move(ext_dir));
     }
+
+    // When there are no layers to apply, return early as there is no need to rebuild the RomFS
+    if (layers.empty() && layers_ext.empty()) {
+        return;
+    }
+
     layers.push_back(std::move(extracted));
 
     auto layered = LayeredVfsDirectory::MakeLayeredDirectory(std::move(layers));
@@ -434,7 +458,8 @@ std::map<std::string, std::string, std::less<>> PatchManager::GetPatchVersionNam
     // Game Updates
     const auto update_tid = GetUpdateTitleID(title_id);
     PatchManager update{update_tid};
-    auto [nacp, discard_icon_file] = update.GetControlMetadata();
+    const auto metadata = update.GetControlMetadata();
+    const auto& nacp = metadata.first;
 
     const auto update_disabled =
         std::find(disabled.cbegin(), disabled.cend(), "Update") != disabled.cend();
@@ -463,7 +488,7 @@ std::map<std::string, std::string, std::less<>> PatchManager::GetPatchVersionNam
         for (const auto& mod : mod_dir->GetSubdirectories()) {
             std::string types;
 
-            const auto exefs_dir = mod->GetSubdirectory("exefs");
+            const auto exefs_dir = FindSubdirectoryCaseless(mod, "exefs");
             if (IsDirValidAndNonEmpty(exefs_dir)) {
                 bool ips = false;
                 bool ipswitch = false;
@@ -487,9 +512,9 @@ std::map<std::string, std::string, std::less<>> PatchManager::GetPatchVersionNam
                 if (layeredfs)
                     AppendCommaIfNotEmpty(types, "LayeredExeFS");
             }
-            if (IsDirValidAndNonEmpty(mod->GetSubdirectory("romfs")))
+            if (IsDirValidAndNonEmpty(FindSubdirectoryCaseless(mod, "romfs")))
                 AppendCommaIfNotEmpty(types, "LayeredFS");
-            if (IsDirValidAndNonEmpty(mod->GetSubdirectory("cheats")))
+            if (IsDirValidAndNonEmpty(FindSubdirectoryCaseless(mod, "cheats")))
                 AppendCommaIfNotEmpty(types, "Cheats");
 
             if (types.empty())

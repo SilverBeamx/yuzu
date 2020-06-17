@@ -68,6 +68,7 @@ enum class RenderTargetFormat : u32 {
     BGR5A1_UNORM = 0xE9,
     RG8_UNORM = 0xEA,
     RG8_SNORM = 0xEB,
+    RG8_UINT = 0xED,
     R16_UNORM = 0xEE,
     R16_SNORM = 0xEF,
     R16_SINT = 0xF0,
@@ -155,7 +156,27 @@ public:
     /// Calls a GPU method.
     void CallMethod(const MethodCall& method_call);
 
+    /// Calls a GPU multivalue method.
+    void CallMultiMethod(u32 method, u32 subchannel, const u32* base_start, u32 amount,
+                         u32 methods_pending);
+
+    /// Flush all current written commands into the host GPU for execution.
     void FlushCommands();
+    /// Synchronizes CPU writes with Host GPU memory.
+    void SyncGuestHost();
+    /// Signal the ending of command list.
+    virtual void OnCommandListEnd();
+
+    /// Request a host GPU memory flush from the CPU.
+    u64 RequestFlush(VAddr addr, std::size_t size);
+
+    /// Obtains current flush request fence id.
+    u64 CurrentFlushRequestFence() const {
+        return current_flush_fence.load(std::memory_order_relaxed);
+    }
+
+    /// Tick pending requests within the GPU.
+    void TickWork();
 
     /// Returns a reference to the Maxwell3D GPU engine.
     Engines::Maxwell3D& Maxwell3D();
@@ -270,13 +291,13 @@ public:
     virtual void SwapBuffers(const Tegra::FramebufferConfig* framebuffer) = 0;
 
     /// Notify rasterizer that any caches of the specified region should be flushed to Switch memory
-    virtual void FlushRegion(CacheAddr addr, u64 size) = 0;
+    virtual void FlushRegion(VAddr addr, u64 size) = 0;
 
     /// Notify rasterizer that any caches of the specified region should be invalidated
-    virtual void InvalidateRegion(CacheAddr addr, u64 size) = 0;
+    virtual void InvalidateRegion(VAddr addr, u64 size) = 0;
 
     /// Notify rasterizer that any caches of the specified region should be flushed and invalidated
-    virtual void FlushAndInvalidateRegion(CacheAddr addr, u64 size) = 0;
+    virtual void FlushAndInvalidateRegion(VAddr addr, u64 size) = 0;
 
 protected:
     virtual void TriggerCpuInterrupt(u32 syncpoint_id, u32 value) const = 0;
@@ -293,8 +314,12 @@ private:
     /// Calls a GPU engine method.
     void CallEngineMethod(const MethodCall& method_call);
 
+    /// Calls a GPU engine multivalue method.
+    void CallEngineMultiMethod(u32 method, u32 subchannel, const u32* base_start, u32 amount,
+                               u32 methods_pending);
+
     /// Determines where the method should be executed.
-    bool ExecuteMethodOnEngine(const MethodCall& method_call);
+    bool ExecuteMethodOnEngine(u32 method);
 
 protected:
     std::unique_ptr<Tegra::DmaPusher> dma_pusher;
@@ -324,6 +349,19 @@ private:
     std::mutex sync_mutex;
 
     std::condition_variable sync_cv;
+
+    struct FlushRequest {
+        FlushRequest(u64 fence, VAddr addr, std::size_t size)
+            : fence{fence}, addr{addr}, size{size} {}
+        u64 fence;
+        VAddr addr;
+        std::size_t size;
+    };
+
+    std::list<FlushRequest> flush_requests;
+    std::atomic<u64> current_flush_fence{};
+    u64 last_flush_fence{};
+    std::mutex flush_request_mutex;
 
     const bool is_async;
 };

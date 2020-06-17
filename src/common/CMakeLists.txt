@@ -32,6 +32,8 @@ add_custom_command(OUTPUT scm_rev.cpp
     DEPENDS
       # WARNING! It was too much work to try and make a common location for this list,
       # so if you need to change it, please update CMakeModules/GenerateSCMRev.cmake as well
+      "${VIDEO_CORE}/renderer_opengl/gl_arb_decompiler.cpp"
+      "${VIDEO_CORE}/renderer_opengl/gl_arb_decompiler.h"
       "${VIDEO_CORE}/renderer_opengl/gl_shader_cache.cpp"
       "${VIDEO_CORE}/renderer_opengl/gl_shader_cache.h"
       "${VIDEO_CORE}/renderer_opengl/gl_shader_decompiler.cpp"
@@ -106,6 +108,8 @@ add_library(common STATIC
     common_funcs.h
     common_paths.h
     common_types.h
+    dynamic_library.cpp
+    dynamic_library.h
     file_util.cpp
     file_util.h
     hash.h
@@ -121,6 +125,8 @@ add_library(common STATIC
     lz4_compression.cpp
     lz4_compression.h
     math_util.h
+    memory_detect.cpp
+    memory_detect.h
     memory_hook.cpp
     memory_hook.h
     microprofile.cpp
@@ -146,6 +152,8 @@ add_library(common STATIC
     thread.h
     thread_queue_list.h
     threadsafe_queue.h
+    time_zone.cpp
+    time_zone.h
     timer.cpp
     timer.h
     uint128.cpp
@@ -153,6 +161,8 @@ add_library(common STATIC
     uuid.cpp
     uuid.h
     vector_math.h
+    virtual_buffer.cpp
+    virtual_buffer.h
     web_result.h
     zstd_compression.cpp
     zstd_compression.h
@@ -163,10 +173,12 @@ if(ARCHITECTURE_x86_64)
         PRIVATE
             x64/cpu_detect.cpp
             x64/cpu_detect.h
+            x64/xbyak_abi.h
+            x64/xbyak_util.h
     )
 endif()
 
 create_target_directory_groups(common)
 
-target_link_libraries(common PUBLIC Boost::boost fmt microprofile)
-target_link_libraries(common PRIVATE lz4_static libzstd_static)
+target_link_libraries(common PUBLIC Boost::boost fmt::fmt microprofile)
+target_link_libraries(common PRIVATE lz4::lz4 zstd::zstd xbyak)

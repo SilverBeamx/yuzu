@@ -68,13 +68,13 @@ public:
         return gpu_addr;
     }
 
-    bool Overlaps(const CacheAddr start, const CacheAddr end) const {
-        return (cache_addr < end) && (cache_addr_end > start);
+    bool Overlaps(const VAddr start, const VAddr end) const {
+        return (cpu_addr < end) && (cpu_addr_end > start);
     }
 
-    bool IsInside(const GPUVAddr other_start, const GPUVAddr other_end) {
+    bool IsInside(const GPUVAddr other_start, const GPUVAddr other_end) const {
         const GPUVAddr gpu_addr_end = gpu_addr + guest_memory_size;
-        return (gpu_addr <= other_start && other_end <= gpu_addr_end);
+        return gpu_addr <= other_start && other_end <= gpu_addr_end;
     }
 
     // Use only when recycling a surface
@@ -86,21 +86,13 @@ public:
         return cpu_addr;
     }
 
+    VAddr GetCpuAddrEnd() const {
+        return cpu_addr_end;
+    }
+
     void SetCpuAddr(const VAddr new_addr) {
         cpu_addr = new_addr;
-    }
-
-    CacheAddr GetCacheAddr() const {
-        return cache_addr;
-    }
-
-    CacheAddr GetCacheAddrEnd() const {
-        return cache_addr_end;
-    }
-
-    void SetCacheAddr(const CacheAddr new_addr) {
-        cache_addr = new_addr;
-        cache_addr_end = new_addr + guest_memory_size;
+        cpu_addr_end = new_addr + guest_memory_size;
     }
 
     const SurfaceParams& GetSurfaceParams() const {
@@ -117,14 +109,6 @@ public:
 
     std::size_t GetMipmapSize(const u32 level) const {
         return mipmap_sizes[level];
-    }
-
-    void MarkAsContinuous(const bool is_continuous) {
-        this->is_continuous = is_continuous;
-    }
-
-    bool IsContinuous() const {
-        return is_continuous;
     }
 
     bool IsLinear() const {
@@ -175,10 +159,8 @@ protected:
     std::size_t guest_memory_size;
     std::size_t host_memory_size;
     GPUVAddr gpu_addr{};
-    CacheAddr cache_addr{};
-    CacheAddr cache_addr_end{};
     VAddr cpu_addr{};
-    bool is_continuous{};
+    VAddr cpu_addr_end{};
     bool is_converted{};
 
     std::vector<std::size_t> mipmap_sizes;
@@ -210,6 +192,22 @@ public:
         index = index_;
     }
 
+    void SetMemoryMarked(bool is_memory_marked_) {
+        is_memory_marked = is_memory_marked_;
+    }
+
+    bool IsMemoryMarked() const {
+        return is_memory_marked;
+    }
+
+    void SetSyncPending(bool is_sync_pending_) {
+        is_sync_pending = is_sync_pending_;
+    }
+
+    bool IsSyncPending() const {
+        return is_sync_pending;
+    }
+
     void MarkAsPicked(bool is_picked_) {
         is_picked = is_picked_;
     }
@@ -219,8 +217,8 @@ public:
     }
 
     bool IsProtected() const {
-        // Only 3D Slices are to be protected
-        return is_target && params.block_depth > 0;
+        // Only 3D slices are to be protected
+        return is_target && params.target == SurfaceTarget::Texture3D;
     }
 
     bool IsRenderTarget() const {
@@ -252,6 +250,11 @@ public:
         return GetView(ViewParams(overview_params.target, 0, num_layers, 0, params.num_levels));
     }
 
+    TView Emplace3DView(u32 slice, u32 depth, u32 base_level, u32 num_levels) {
+        return GetView(ViewParams(VideoCore::Surface::SurfaceTarget::Texture3D, slice, depth,
+                                  base_level, num_levels));
+    }
+
     std::optional<TView> EmplaceIrregularView(const SurfaceParams& view_params,
                                               const GPUVAddr view_addr,
                                               const std::size_t candidate_size, const u32 mipmap,
@@ -274,8 +277,8 @@ public:
     std::optional<TView> EmplaceView(const SurfaceParams& view_params, const GPUVAddr view_addr,
                                      const std::size_t candidate_size) {
         if (params.target == SurfaceTarget::Texture3D ||
-            (params.num_levels == 1 && !params.is_layered) ||
-            view_params.target == SurfaceTarget::Texture3D) {
+            view_params.target == SurfaceTarget::Texture3D ||
+            (params.num_levels == 1 && !params.is_layered)) {
             return {};
         }
         const auto layer_mipmap{GetLayerMipmap(view_addr)};
@@ -321,6 +324,8 @@ private:
     bool is_target{};
     bool is_registered{};
     bool is_picked{};
+    bool is_memory_marked{};
+    bool is_sync_pending{};
     u32 index{NO_RT};
     u64 modification_tick{};
 };

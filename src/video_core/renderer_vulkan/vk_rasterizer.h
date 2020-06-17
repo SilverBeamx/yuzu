@@ -14,14 +14,13 @@
 #include <boost/functional/hash.hpp>
 
 #include "common/common_types.h"
-#include "video_core/memory_manager.h"
 #include "video_core/rasterizer_accelerated.h"
 #include "video_core/rasterizer_interface.h"
-#include "video_core/renderer_vulkan/declarations.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
+#include "video_core/renderer_vulkan/vk_fence_manager.h"
 #include "video_core/renderer_vulkan/vk_memory_manager.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
@@ -32,6 +31,7 @@
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
+#include "video_core/renderer_vulkan/wrapper.h"
 
 namespace Core {
 class System;
@@ -49,11 +49,10 @@ namespace Vulkan {
 
 struct VKScreenInfo;
 
-using ImageViewsPack =
-    boost::container::static_vector<vk::ImageView, Maxwell::NumRenderTargets + 1>;
+using ImageViewsPack = boost::container::static_vector<VkImageView, Maxwell::NumRenderTargets + 1>;
 
 struct FramebufferCacheKey {
-    vk::RenderPass renderpass{};
+    VkRenderPass renderpass{};
     u32 width = 0;
     u32 height = 0;
     u32 layers = 0;
@@ -101,7 +100,7 @@ class BufferBindings;
 
 struct ImageView {
     View view;
-    vk::ImageLayout* layout = nullptr;
+    VkImageLayout* layout = nullptr;
 };
 
 class RasterizerVulkan final : public VideoCore::RasterizerAccelerated {
@@ -118,9 +117,16 @@ public:
     void ResetCounter(VideoCore::QueryType type) override;
     void Query(GPUVAddr gpu_addr, VideoCore::QueryType type, std::optional<u64> timestamp) override;
     void FlushAll() override;
-    void FlushRegion(CacheAddr addr, u64 size) override;
-    void InvalidateRegion(CacheAddr addr, u64 size) override;
-    void FlushAndInvalidateRegion(CacheAddr addr, u64 size) override;
+    void FlushRegion(VAddr addr, u64 size) override;
+    bool MustFlushRegion(VAddr addr, u64 size) override;
+    void InvalidateRegion(VAddr addr, u64 size) override;
+    void OnCPUWrite(VAddr addr, u64 size) override;
+    void SyncGuestHost() override;
+    void SignalSemaphore(GPUVAddr addr, u32 value) override;
+    void SignalSyncPoint(u32 value) override;
+    void ReleaseFences() override;
+    void FlushAndInvalidateRegion(VAddr addr, u64 size) override;
+    void WaitForIdle() override;
     void FlushCommands() override;
     void TickFrame() override;
     bool AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Regs::Surface& src,
@@ -137,7 +143,7 @@ public:
 
 private:
     struct DrawParameters {
-        void Draw(vk::CommandBuffer cmdbuf, const vk::DispatchLoaderDynamic& dld) const;
+        void Draw(vk::CommandBuffer cmdbuf) const;
 
         u32 base_instance = 0;
         u32 num_instances = 0;
@@ -149,19 +155,20 @@ private:
     using Texceptions = std::bitset<Maxwell::NumRenderTargets + 1>;
 
     static constexpr std::size_t ZETA_TEXCEPTION_INDEX = 8;
+    static constexpr VkDeviceSize DEFAULT_BUFFER_SIZE = 4 * sizeof(float);
 
     void FlushWork();
 
     Texceptions UpdateAttachments();
 
-    std::tuple<vk::Framebuffer, vk::Extent2D> ConfigureFramebuffers(vk::RenderPass renderpass);
+    std::tuple<VkFramebuffer, VkExtent2D> ConfigureFramebuffers(VkRenderPass renderpass);
 
     /// Setups geometry buffers and state.
     DrawParameters SetupGeometry(FixedPipelineState& fixed_state, BufferBindings& buffer_bindings,
                                  bool is_indexed, bool is_instanced);
 
     /// Setup descriptors in the graphics pipeline.
-    void SetupShaderDescriptors(const std::array<Shader, Maxwell::MaxShaderProgram>& shaders);
+    void SetupShaderDescriptors(const std::array<Shader*, Maxwell::MaxShaderProgram>& shaders);
 
     void SetupImageTransitions(Texceptions texceptions,
                                const std::array<View, Maxwell::NumRenderTargets>& color_attachments,
@@ -186,11 +193,14 @@ private:
     /// Setup global buffers in the graphics pipeline.
     void SetupGraphicsGlobalBuffers(const ShaderEntries& entries, std::size_t stage);
 
-    /// Setup texel buffers in the graphics pipeline.
-    void SetupGraphicsTexelBuffers(const ShaderEntries& entries, std::size_t stage);
+    /// Setup uniform texels in the graphics pipeline.
+    void SetupGraphicsUniformTexels(const ShaderEntries& entries, std::size_t stage);
 
     /// Setup textures in the graphics pipeline.
     void SetupGraphicsTextures(const ShaderEntries& entries, std::size_t stage);
+
+    /// Setup storage texels in the graphics pipeline.
+    void SetupGraphicsStorageTexels(const ShaderEntries& entries, std::size_t stage);
 
     /// Setup images in the graphics pipeline.
     void SetupGraphicsImages(const ShaderEntries& entries, std::size_t stage);
@@ -202,10 +212,13 @@ private:
     void SetupComputeGlobalBuffers(const ShaderEntries& entries);
 
     /// Setup texel buffers in the compute pipeline.
-    void SetupComputeTexelBuffers(const ShaderEntries& entries);
+    void SetupComputeUniformTexels(const ShaderEntries& entries);
 
     /// Setup textures in the compute pipeline.
     void SetupComputeTextures(const ShaderEntries& entries);
+
+    /// Setup storage texels in the compute pipeline.
+    void SetupComputeStorageTexels(const ShaderEntries& entries);
 
     /// Setup images in the compute pipeline.
     void SetupComputeImages(const ShaderEntries& entries);
@@ -215,9 +228,11 @@ private:
 
     void SetupGlobalBuffer(const GlobalBufferEntry& entry, GPUVAddr address);
 
-    void SetupTexelBuffer(const Tegra::Texture::TICEntry& image, const TexelBufferEntry& entry);
+    void SetupUniformTexels(const Tegra::Texture::TICEntry& image, const UniformTexelEntry& entry);
 
     void SetupTexture(const Tegra::Texture::FullTextureInfo& texture, const SamplerEntry& entry);
+
+    void SetupStorageTexel(const Tegra::Texture::TICEntry& tic, const StorageTexelEntry& entry);
 
     void SetupImage(const Tegra::Texture::TICEntry& tic, const ImageEntry& entry);
 
@@ -241,6 +256,8 @@ private:
 
     RenderPassParams GetRenderPassParams(Texceptions texceptions) const;
 
+    VkBuffer DefaultBuffer();
+
     Core::System& system;
     Core::Frontend::EmuWindow& render_window;
     VKScreenInfo& screen_info;
@@ -255,13 +272,19 @@ private:
     VKUpdateDescriptorQueue update_descriptor_queue;
     VKRenderPassCache renderpass_cache;
     QuadArrayPass quad_array_pass;
+    QuadIndexedPass quad_indexed_pass;
     Uint8Pass uint8_pass;
 
     VKTextureCache texture_cache;
     VKPipelineCache pipeline_cache;
     VKBufferCache buffer_cache;
     VKSamplerCache sampler_cache;
+    VKFenceManager fence_manager;
     VKQueryCache query_cache;
+
+    vk::Buffer default_buffer;
+    VKMemoryCommit default_buffer_commit;
+    vk::Event wfi_event;
 
     std::array<View, Maxwell::NumRenderTargets> color_attachments;
     View zeta_attachment;
@@ -272,7 +295,7 @@ private:
     u32 draw_counter = 0;
 
     // TODO(Rodrigo): Invalidate on image destruction
-    std::unordered_map<FramebufferCacheKey, UniqueFramebuffer> framebuffer_cache;
+    std::unordered_map<FramebufferCacheKey, vk::Framebuffer> framebuffer_cache;
 };
 
 } // namespace Vulkan

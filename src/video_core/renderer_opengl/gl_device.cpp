@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <vector>
 
@@ -13,6 +14,7 @@
 
 #include "common/logging/log.h"
 #include "common/scope_exit.h"
+#include "core/settings.h"
 #include "video_core/renderer_opengl/gl_device.h"
 #include "video_core/renderer_opengl/gl_resource_manager.h"
 
@@ -25,24 +27,27 @@ constexpr u32 ReservedUniformBlocks = 1;
 
 constexpr u32 NumStages = 5;
 
-constexpr std::array LimitUBOs = {GL_MAX_VERTEX_UNIFORM_BLOCKS, GL_MAX_TESS_CONTROL_UNIFORM_BLOCKS,
-                                  GL_MAX_TESS_EVALUATION_UNIFORM_BLOCKS,
-                                  GL_MAX_GEOMETRY_UNIFORM_BLOCKS, GL_MAX_FRAGMENT_UNIFORM_BLOCKS};
+constexpr std::array LimitUBOs = {
+    GL_MAX_VERTEX_UNIFORM_BLOCKS,          GL_MAX_TESS_CONTROL_UNIFORM_BLOCKS,
+    GL_MAX_TESS_EVALUATION_UNIFORM_BLOCKS, GL_MAX_GEOMETRY_UNIFORM_BLOCKS,
+    GL_MAX_FRAGMENT_UNIFORM_BLOCKS,        GL_MAX_COMPUTE_UNIFORM_BLOCKS};
 
 constexpr std::array LimitSSBOs = {
-    GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS, GL_MAX_TESS_CONTROL_SHADER_STORAGE_BLOCKS,
+    GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS,          GL_MAX_TESS_CONTROL_SHADER_STORAGE_BLOCKS,
     GL_MAX_TESS_EVALUATION_SHADER_STORAGE_BLOCKS, GL_MAX_GEOMETRY_SHADER_STORAGE_BLOCKS,
-    GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS};
+    GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS,        GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS};
 
-constexpr std::array LimitSamplers = {
-    GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS, GL_MAX_TESS_CONTROL_TEXTURE_IMAGE_UNITS,
-    GL_MAX_TESS_EVALUATION_TEXTURE_IMAGE_UNITS, GL_MAX_GEOMETRY_TEXTURE_IMAGE_UNITS,
-    GL_MAX_TEXTURE_IMAGE_UNITS};
+constexpr std::array LimitSamplers = {GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS,
+                                      GL_MAX_TESS_CONTROL_TEXTURE_IMAGE_UNITS,
+                                      GL_MAX_TESS_EVALUATION_TEXTURE_IMAGE_UNITS,
+                                      GL_MAX_GEOMETRY_TEXTURE_IMAGE_UNITS,
+                                      GL_MAX_TEXTURE_IMAGE_UNITS,
+                                      GL_MAX_COMPUTE_TEXTURE_IMAGE_UNITS};
 
-constexpr std::array LimitImages = {GL_MAX_VERTEX_IMAGE_UNIFORMS,
-                                    GL_MAX_TESS_CONTROL_IMAGE_UNIFORMS,
-                                    GL_MAX_TESS_EVALUATION_IMAGE_UNIFORMS,
-                                    GL_MAX_GEOMETRY_IMAGE_UNIFORMS, GL_MAX_FRAGMENT_IMAGE_UNIFORMS};
+constexpr std::array LimitImages = {
+    GL_MAX_VERTEX_IMAGE_UNIFORMS,          GL_MAX_TESS_CONTROL_IMAGE_UNIFORMS,
+    GL_MAX_TESS_EVALUATION_IMAGE_UNIFORMS, GL_MAX_GEOMETRY_IMAGE_UNIFORMS,
+    GL_MAX_FRAGMENT_IMAGE_UNIFORMS,        GL_MAX_COMPUTE_IMAGE_UNIFORMS};
 
 template <typename T>
 T GetInteger(GLenum pname) {
@@ -84,10 +89,17 @@ u32 Extract(u32& base, u32& num, u32 amount, std::optional<GLenum> limit = {}) {
     return std::exchange(base, base + amount);
 }
 
+std::array<u32, Tegra::Engines::MaxShaderTypes> BuildMaxUniformBuffers() noexcept {
+    std::array<u32, Tegra::Engines::MaxShaderTypes> max;
+    std::transform(LimitUBOs.begin(), LimitUBOs.end(), max.begin(),
+                   [](GLenum pname) { return GetInteger<u32>(pname); });
+    return max;
+}
+
 std::array<Device::BaseBindings, Tegra::Engines::MaxShaderTypes> BuildBaseBindings() noexcept {
     std::array<Device::BaseBindings, Tegra::Engines::MaxShaderTypes> bindings;
 
-    static std::array<std::size_t, 5> stage_swizzle = {0, 1, 2, 3, 4};
+    static constexpr std::array<std::size_t, 5> stage_swizzle{0, 1, 2, 3, 4};
     const u32 total_ubos = GetInteger<u32>(GL_MAX_UNIFORM_BUFFER_BINDINGS);
     const u32 total_ssbos = GetInteger<u32>(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS);
     const u32 total_samplers = GetInteger<u32>(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS);
@@ -132,6 +144,7 @@ std::array<Device::BaseBindings, Tegra::Engines::MaxShaderTypes> BuildBaseBindin
 }
 
 bool IsASTCSupported() {
+    static constexpr std::array targets = {GL_TEXTURE_2D, GL_TEXTURE_2D_ARRAY};
     static constexpr std::array formats = {
         GL_COMPRESSED_RGBA_ASTC_4x4_KHR,           GL_COMPRESSED_RGBA_ASTC_5x4_KHR,
         GL_COMPRESSED_RGBA_ASTC_5x5_KHR,           GL_COMPRESSED_RGBA_ASTC_6x5_KHR,
@@ -148,25 +161,43 @@ bool IsASTCSupported() {
         GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x8_KHR,  GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x10_KHR,
         GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x10_KHR, GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR,
     };
-    return std::find_if_not(formats.begin(), formats.end(), [](GLenum format) {
-               GLint supported;
-               glGetInternalformativ(GL_TEXTURE_2D, format, GL_INTERNALFORMAT_SUPPORTED, 1,
-                                     &supported);
-               return supported == GL_TRUE;
-           }) == formats.end();
+    static constexpr std::array required_support = {
+        GL_VERTEX_TEXTURE,   GL_TESS_CONTROL_TEXTURE, GL_TESS_EVALUATION_TEXTURE,
+        GL_GEOMETRY_TEXTURE, GL_FRAGMENT_TEXTURE,     GL_COMPUTE_TEXTURE,
+    };
+
+    for (const GLenum target : targets) {
+        for (const GLenum format : formats) {
+            for (const GLenum support : required_support) {
+                GLint value;
+                glGetInternalformativ(GL_TEXTURE_2D, format, support, 1, &value);
+                if (value != GL_FULL_SUPPORT) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
 }
 
 } // Anonymous namespace
 
-Device::Device() : base_bindings{BuildBaseBindings()} {
+Device::Device()
+    : max_uniform_buffers{BuildMaxUniformBuffers()}, base_bindings{BuildBaseBindings()} {
     const std::string_view vendor = reinterpret_cast<const char*>(glGetString(GL_VENDOR));
-    const auto renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
+    const std::string_view version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
     const std::vector extensions = GetExtensions();
 
     const bool is_nvidia = vendor == "NVIDIA Corporation";
     const bool is_amd = vendor == "ATI Technologies Inc.";
-    const bool is_intel = vendor == "Intel";
-    const bool is_intel_proprietary = is_intel && std::strstr(renderer, "Mesa") == nullptr;
+
+    bool disable_fast_buffer_sub_data = false;
+    if (is_nvidia && version == "4.6.0 NVIDIA 443.24") {
+        LOG_WARNING(
+            Render_OpenGL,
+            "Beta driver 443.24 is known to have issues. There might be performance issues.");
+        disable_fast_buffer_sub_data = true;
+    }
 
     uniform_buffer_alignment = GetInteger<std::size_t>(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT);
     shader_storage_alignment = GetInteger<std::size_t>(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT);
@@ -181,16 +212,25 @@ Device::Device() : base_bindings{BuildBaseBindings()} {
     has_variable_aoffi = TestVariableAoffi();
     has_component_indexing_bug = is_amd;
     has_precise_bug = TestPreciseBug();
-    has_broken_compute = is_intel_proprietary;
-    has_fast_buffer_sub_data = is_nvidia;
+    has_fast_buffer_sub_data = is_nvidia && !disable_fast_buffer_sub_data;
+    has_nv_viewport_array2 = GLAD_GL_NV_viewport_array2;
+    use_assembly_shaders = Settings::values.use_assembly_shaders && GLAD_GL_NV_gpu_program5 &&
+                           GLAD_GL_NV_compute_program5 && GLAD_GL_NV_transform_feedback &&
+                           GLAD_GL_NV_transform_feedback2;
 
     LOG_INFO(Render_OpenGL, "Renderer_VariableAOFFI: {}", has_variable_aoffi);
     LOG_INFO(Render_OpenGL, "Renderer_ComponentIndexingBug: {}", has_component_indexing_bug);
     LOG_INFO(Render_OpenGL, "Renderer_PreciseBug: {}", has_precise_bug);
+
+    if (Settings::values.use_assembly_shaders && !use_assembly_shaders) {
+        LOG_ERROR(Render_OpenGL, "Assembly shaders enabled but not supported");
+    }
 }
 
 Device::Device(std::nullptr_t) {
-    uniform_buffer_alignment = 0;
+    max_uniform_buffers.fill(std::numeric_limits<u32>::max());
+    uniform_buffer_alignment = 4;
+    shader_storage_alignment = 4;
     max_vertex_attributes = 16;
     max_varyings = 15;
     has_warp_intrinsics = true;
@@ -198,9 +238,6 @@ Device::Device(std::nullptr_t) {
     has_vertex_viewport_layer = true;
     has_image_load_formatted = true;
     has_variable_aoffi = true;
-    has_component_indexing_bug = false;
-    has_broken_compute = false;
-    has_precise_bug = false;
 }
 
 bool Device::TestVariableAoffi() {

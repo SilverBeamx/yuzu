@@ -5,11 +5,13 @@
 #pragma once
 
 #include <memory>
-#include <optional>
+#include <string>
 #include <vector>
 
+#include "common/dynamic_library.h"
+
 #include "video_core/renderer_base.h"
-#include "video_core/renderer_vulkan/declarations.h"
+#include "video_core/renderer_vulkan/wrapper.h"
 
 namespace Core {
 class System;
@@ -44,22 +46,28 @@ public:
     void SwapBuffers(const Tegra::FramebufferConfig* framebuffer) override;
     bool TryPresent(int timeout_ms) override;
 
-private:
-    std::optional<vk::DebugUtilsMessengerEXT> CreateDebugCallback(
-        const vk::DispatchLoaderDynamic& dldi);
+    static std::vector<std::string> EnumerateDevices();
 
-    bool PickDevices(const vk::DispatchLoaderDynamic& dldi);
+private:
+    bool CreateDebugCallback();
+
+    bool CreateSurface();
+
+    bool PickDevices();
 
     void Report() const;
 
     Core::System& system;
+
+    Common::DynamicLibrary library;
+    vk::InstanceDispatch dld;
 
     vk::Instance instance;
     vk::SurfaceKHR surface;
 
     VKScreenInfo screen_info;
 
-    UniqueDebugUtilsMessengerEXT debug_callback;
+    vk::DebugCallback debug_callback;
     std::unique_ptr<VKDevice> device;
     std::unique_ptr<VKSwapchain> swapchain;
     std::unique_ptr<VKMemoryManager> memory_manager;

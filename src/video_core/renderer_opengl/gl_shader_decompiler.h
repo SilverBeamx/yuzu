@@ -33,36 +33,19 @@ public:
     }
 
 private:
-    u32 index{};
+    u32 index = 0;
 };
 
-class GlobalMemoryEntry {
-public:
-    explicit GlobalMemoryEntry(u32 cbuf_index, u32 cbuf_offset, bool is_read, bool is_written)
+struct GlobalMemoryEntry {
+    constexpr explicit GlobalMemoryEntry(u32 cbuf_index, u32 cbuf_offset, bool is_read,
+                                         bool is_written)
         : cbuf_index{cbuf_index}, cbuf_offset{cbuf_offset}, is_read{is_read}, is_written{
                                                                                   is_written} {}
 
-    u32 GetCbufIndex() const {
-        return cbuf_index;
-    }
-
-    u32 GetCbufOffset() const {
-        return cbuf_offset;
-    }
-
-    bool IsRead() const {
-        return is_read;
-    }
-
-    bool IsWritten() const {
-        return is_written;
-    }
-
-private:
-    u32 cbuf_index{};
-    u32 cbuf_offset{};
-    bool is_read{};
-    bool is_written{};
+    u32 cbuf_index = 0;
+    u32 cbuf_offset = 0;
+    bool is_read = false;
+    bool is_written = false;
 };
 
 struct ShaderEntries {
@@ -70,11 +53,13 @@ struct ShaderEntries {
     std::vector<GlobalMemoryEntry> global_memory_entries;
     std::vector<SamplerEntry> samplers;
     std::vector<ImageEntry> images;
-    u32 clip_distances{};
     std::size_t shader_length{};
+    u32 clip_distances{};
+    bool use_unified_uniforms{};
 };
 
-ShaderEntries MakeEntries(const VideoCommon::Shader::ShaderIR& ir);
+ShaderEntries MakeEntries(const Device& device, const VideoCommon::Shader::ShaderIR& ir,
+                          Tegra::Engines::ShaderType stage);
 
 std::string DecompileShader(const Device& device, const VideoCommon::Shader::ShaderIR& ir,
                             const VideoCommon::Shader::Registry& registry,

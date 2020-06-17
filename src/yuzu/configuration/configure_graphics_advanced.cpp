@@ -19,9 +19,12 @@ ConfigureGraphicsAdvanced::~ConfigureGraphicsAdvanced() = default;
 
 void ConfigureGraphicsAdvanced::SetConfiguration() {
     const bool runtime_lock = !Core::System::GetInstance().IsPoweredOn();
-    ui->use_accurate_gpu_emulation->setChecked(Settings::values.use_accurate_gpu_emulation);
+    ui->gpu_accuracy->setCurrentIndex(static_cast<int>(Settings::values.gpu_accuracy));
     ui->use_vsync->setEnabled(runtime_lock);
     ui->use_vsync->setChecked(Settings::values.use_vsync);
+    ui->use_assembly_shaders->setEnabled(runtime_lock);
+    ui->use_assembly_shaders->setChecked(Settings::values.use_assembly_shaders);
+    ui->use_fast_gpu_time->setChecked(Settings::values.use_fast_gpu_time);
     ui->force_30fps_mode->setEnabled(runtime_lock);
     ui->force_30fps_mode->setChecked(Settings::values.force_30fps_mode);
     ui->anisotropic_filtering_combobox->setEnabled(runtime_lock);
@@ -29,8 +32,11 @@ void ConfigureGraphicsAdvanced::SetConfiguration() {
 }
 
 void ConfigureGraphicsAdvanced::ApplyConfiguration() {
-    Settings::values.use_accurate_gpu_emulation = ui->use_accurate_gpu_emulation->isChecked();
+    auto gpu_accuracy = static_cast<Settings::GPUAccuracy>(ui->gpu_accuracy->currentIndex());
+    Settings::values.gpu_accuracy = gpu_accuracy;
     Settings::values.use_vsync = ui->use_vsync->isChecked();
+    Settings::values.use_assembly_shaders = ui->use_assembly_shaders->isChecked();
+    Settings::values.use_fast_gpu_time = ui->use_fast_gpu_time->isChecked();
     Settings::values.force_30fps_mode = ui->force_30fps_mode->isChecked();
     Settings::values.max_anisotropy = ui->anisotropic_filtering_combobox->currentIndex();
 }

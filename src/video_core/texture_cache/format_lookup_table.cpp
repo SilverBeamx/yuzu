@@ -41,7 +41,7 @@ struct Table {
     ComponentType alpha_component;
     bool is_srgb;
 };
-constexpr std::array<Table, 76> DefinitionTable = {{
+constexpr std::array<Table, 78> DefinitionTable = {{
     {TextureFormat::A8R8G8B8, C, UNORM, UNORM, UNORM, UNORM, PixelFormat::ABGR8U},
     {TextureFormat::A8R8G8B8, C, SNORM, SNORM, SNORM, SNORM, PixelFormat::ABGR8S},
     {TextureFormat::A8R8G8B8, C, UINT, UINT, UINT, UINT, PixelFormat::ABGR8UI},
@@ -60,6 +60,7 @@ constexpr std::array<Table, 76> DefinitionTable = {{
 
     {TextureFormat::G8R8, C, UNORM, UNORM, UNORM, UNORM, PixelFormat::RG8U},
     {TextureFormat::G8R8, C, SNORM, SNORM, SNORM, SNORM, PixelFormat::RG8S},
+    {TextureFormat::G8R8, C, UINT, UINT, UINT, UINT, PixelFormat::RG8UI},
 
     {TextureFormat::R16_G16_B16_A16, C, SNORM, SNORM, SNORM, SNORM, PixelFormat::RGBA16S},
     {TextureFormat::R16_G16_B16_A16, C, UNORM, UNORM, UNORM, UNORM, PixelFormat::RGBA16U},
@@ -97,6 +98,7 @@ constexpr std::array<Table, 76> DefinitionTable = {{
     {TextureFormat::ZF32, C, FLOAT, FLOAT, FLOAT, FLOAT, PixelFormat::Z32F},
     {TextureFormat::Z16, C, UNORM, UNORM, UNORM, UNORM, PixelFormat::Z16},
     {TextureFormat::S8Z24, C, UINT, UNORM, UNORM, UNORM, PixelFormat::S8Z24},
+    {TextureFormat::G24R8, C, UINT, UNORM, UNORM, UNORM, PixelFormat::S8Z24},
     {TextureFormat::ZF32_X24S8, C, FLOAT, UINT, UNORM, UNORM, PixelFormat::Z32FS8},
 
     {TextureFormat::DXT1, C, UNORM, UNORM, UNORM, UNORM, PixelFormat::DXT1},
@@ -196,9 +198,9 @@ std::size_t FormatLookupTable::CalculateIndex(TextureFormat format, bool is_srgb
                                               ComponentType alpha_component) noexcept {
     const auto format_index = static_cast<std::size_t>(format);
     const auto red_index = static_cast<std::size_t>(red_component);
-    const auto green_index = static_cast<std::size_t>(red_component);
-    const auto blue_index = static_cast<std::size_t>(red_component);
-    const auto alpha_index = static_cast<std::size_t>(red_component);
+    const auto green_index = static_cast<std::size_t>(green_component);
+    const auto blue_index = static_cast<std::size_t>(blue_component);
+    const auto alpha_index = static_cast<std::size_t>(alpha_component);
     const std::size_t srgb_index = is_srgb ? 1 : 0;
 
     return format_index * PerFormat +

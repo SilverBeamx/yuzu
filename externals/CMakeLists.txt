@@ -1,15 +1,19 @@
 # Definitions for all external bundled libraries
 
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${PROJECT_SOURCE_DIR}/CMakeModules)
+list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/CMakeModules")
+list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/externals/find-modules")
 include(DownloadExternals)
+
+# xbyak
+if (ARCHITECTURE_x86 OR ARCHITECTURE_x86_64)
+    add_library(xbyak INTERFACE)
+    target_include_directories(xbyak SYSTEM INTERFACE ./xbyak/xbyak)
+    target_compile_definitions(xbyak INTERFACE XBYAK_NO_OP_NAMES)
+endif()
 
 # Catch
 add_library(catch-single-include INTERFACE)
 target_include_directories(catch-single-include INTERFACE catch/single_include)
-
-# libfmt
-add_subdirectory(fmt)
-add_library(fmt::fmt ALIAS fmt)
 
 # Dynarmic
 if (ARCHITECTURE_x86_64)
@@ -29,11 +33,6 @@ add_subdirectory(glad)
 # inih
 add_subdirectory(inih)
 
-# lz4
-set(LZ4_BUNDLED_MODE ON)
-add_subdirectory(lz4/contrib/cmake_unofficial EXCLUDE_FROM_ALL)
-target_include_directories(lz4_static INTERFACE ./lz4/lib)
-
 # mbedtls
 add_subdirectory(mbedtls EXCLUDE_FROM_ALL)
 target_include_directories(mbedtls PUBLIC ./mbedtls/include)
@@ -46,16 +45,8 @@ target_include_directories(microprofile INTERFACE ./microprofile)
 add_library(unicorn-headers INTERFACE)
 target_include_directories(unicorn-headers INTERFACE ./unicorn/include)
 
-# Zstandard
-add_subdirectory(zstd/build/cmake EXCLUDE_FROM_ALL)
-target_include_directories(libzstd_static INTERFACE ./zstd/lib)
-
 # SoundTouch
 add_subdirectory(soundtouch)
-
-# Opus
-add_subdirectory(opus)
-target_include_directories(opus INTERFACE ./opus/include)
 
 # Cubeb
 if(ENABLE_CUBEB)
@@ -74,19 +65,22 @@ if (ENABLE_VULKAN)
     add_subdirectory(sirit)
 endif()
 
-# zlib
-add_subdirectory(zlib EXCLUDE_FROM_ALL)
-set(ZLIB_LIBRARIES z)
-
 # libzip
-add_subdirectory(libzip EXCLUDE_FROM_ALL)
+find_package(Libzip 1.5)
+if (NOT LIBZIP_FOUND)
+    message(STATUS "libzip 1.5 or newer not found, falling back to externals")
+    add_subdirectory(libzip EXCLUDE_FROM_ALL)
+endif()
 
 if (ENABLE_WEB_SERVICE)
     # LibreSSL
     set(LIBRESSL_SKIP_INSTALL ON CACHE BOOL "")
     add_subdirectory(libressl EXCLUDE_FROM_ALL)
     target_include_directories(ssl INTERFACE ./libressl/include)
-	target_compile_definitions(ssl PRIVATE -DHAVE_INET_NTOP)
+    target_compile_definitions(ssl PRIVATE -DHAVE_INET_NTOP)
+    get_directory_property(OPENSSL_LIBRARIES
+        DIRECTORY libressl
+        DEFINITION OPENSSL_LIBS)
 
     # lurlparser
     add_subdirectory(lurlparser EXCLUDE_FROM_ALL)
@@ -94,8 +88,6 @@ if (ENABLE_WEB_SERVICE)
     # httplib
     add_library(httplib INTERFACE)
     target_include_directories(httplib INTERFACE ./httplib)
-
-    # JSON
-    add_library(json-headers INTERFACE)
-    target_include_directories(json-headers INTERFACE ./json)
+    target_compile_definitions(httplib INTERFACE -DCPPHTTPLIB_OPENSSL_SUPPORT)
+    target_link_libraries(httplib INTERFACE ${OPENSSL_LIBRARIES})
 endif()

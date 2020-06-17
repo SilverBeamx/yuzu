@@ -1,6 +1,7 @@
 add_library(video_core STATIC
     buffer_cache/buffer_block.h
     buffer_cache/buffer_cache.h
+    buffer_cache/map_interval.cpp
     buffer_cache/map_interval.h
     dirty_flags.cpp
     dirty_flags.h
@@ -8,6 +9,7 @@ add_library(video_core STATIC
     dma_pusher.h
     engines/const_buffer_engine_interface.h
     engines/const_buffer_info.h
+    engines/engine_interface.h
     engines/engine_upload.cpp
     engines/engine_upload.h
     engines/fermi_2d.cpp
@@ -23,6 +25,13 @@ add_library(video_core STATIC
     engines/shader_bytecode.h
     engines/shader_header.h
     engines/shader_type.h
+    macro/macro.cpp
+    macro/macro.h
+    macro/macro_interpreter.cpp
+    macro/macro_interpreter.h
+    macro/macro_jit_x64.cpp
+    macro/macro_jit_x64.h
+    fence_manager.h
     gpu.cpp
     gpu.h
     gpu_asynch.cpp
@@ -33,8 +42,6 @@ add_library(video_core STATIC
     gpu_thread.h
     guest_driver.cpp
     guest_driver.h
-    macro_interpreter.cpp
-    macro_interpreter.h
     memory_manager.cpp
     memory_manager.h
     morton.cpp
@@ -42,15 +49,17 @@ add_library(video_core STATIC
     query_cache.h
     rasterizer_accelerated.cpp
     rasterizer_accelerated.h
-    rasterizer_cache.cpp
-    rasterizer_cache.h
     rasterizer_interface.h
     renderer_base.cpp
     renderer_base.h
+    renderer_opengl/gl_arb_decompiler.cpp
+    renderer_opengl/gl_arb_decompiler.h
     renderer_opengl/gl_buffer_cache.cpp
     renderer_opengl/gl_buffer_cache.h
     renderer_opengl/gl_device.cpp
     renderer_opengl/gl_device.h
+    renderer_opengl/gl_fence_manager.cpp
+    renderer_opengl/gl_fence_manager.h
     renderer_opengl/gl_framebuffer_cache.cpp
     renderer_opengl/gl_framebuffer_cache.h
     renderer_opengl/gl_rasterizer.cpp
@@ -84,6 +93,7 @@ add_library(video_core STATIC
     renderer_opengl/utils.h
     sampler_cache.cpp
     sampler_cache.h
+    shader_cache.h
     shader/decode/arithmetic.cpp
     shader/decode/arithmetic_immediate.cpp
     shader/decode/bfe.cpp
@@ -121,6 +131,8 @@ add_library(video_core STATIC
     shader/decode.cpp
     shader/expr.cpp
     shader/expr.h
+    shader/memory_util.cpp
+    shader/memory_util.h
     shader/node_helper.cpp
     shader/node_helper.h
     shader/node.h
@@ -148,6 +160,7 @@ add_library(video_core STATIC
     textures/convert.h
     textures/decoders.cpp
     textures/decoders.h
+    textures/texture.cpp
     textures/texture.h
     video_core.cpp
     video_core.h
@@ -155,11 +168,12 @@ add_library(video_core STATIC
 
 if (ENABLE_VULKAN)
     target_sources(video_core PRIVATE
-        renderer_vulkan/declarations.h
         renderer_vulkan/fixed_pipeline_state.cpp
         renderer_vulkan/fixed_pipeline_state.h
         renderer_vulkan/maxwell_to_vk.cpp
         renderer_vulkan/maxwell_to_vk.h
+        renderer_vulkan/nsight_aftermath_tracker.cpp
+        renderer_vulkan/nsight_aftermath_tracker.h
         renderer_vulkan/renderer_vulkan.h
         renderer_vulkan/renderer_vulkan.cpp
         renderer_vulkan/vk_blit_screen.cpp
@@ -174,6 +188,8 @@ if (ENABLE_VULKAN)
         renderer_vulkan/vk_descriptor_pool.h
         renderer_vulkan/vk_device.cpp
         renderer_vulkan/vk_device.h
+        renderer_vulkan/vk_fence_manager.cpp
+        renderer_vulkan/vk_fence_manager.h
         renderer_vulkan/vk_graphics_pipeline.cpp
         renderer_vulkan/vk_graphics_pipeline.h
         renderer_vulkan/vk_image.cpp
@@ -213,17 +229,28 @@ if (ENABLE_VULKAN)
         renderer_vulkan/wrapper.cpp
         renderer_vulkan/wrapper.h
     )
-
-    target_include_directories(video_core PRIVATE sirit ../../externals/Vulkan-Headers/include)
-    target_compile_definitions(video_core PRIVATE HAS_VULKAN)
 endif()
 
 create_target_directory_groups(video_core)
 
 target_link_libraries(video_core PUBLIC common core)
-target_link_libraries(video_core PRIVATE glad)
+target_link_libraries(video_core PRIVATE glad xbyak)
+
 if (ENABLE_VULKAN)
+    target_include_directories(video_core PRIVATE sirit ../../externals/Vulkan-Headers/include)
+    target_compile_definitions(video_core PRIVATE HAS_VULKAN)
     target_link_libraries(video_core PRIVATE sirit)
+endif()
+
+if (ENABLE_NSIGHT_AFTERMATH)
+    if (NOT DEFINED ENV{NSIGHT_AFTERMATH_SDK})
+        message(ERROR "Environment variable NSIGHT_AFTERMATH_SDK has to be provided")
+    endif()
+    if (NOT WIN32)
+        message(ERROR "Nsight Aftermath doesn't support non-Windows platforms")
+    endif()
+    target_compile_definitions(video_core PRIVATE HAS_NSIGHT_AFTERMATH)
+    target_include_directories(video_core PRIVATE "$ENV{NSIGHT_AFTERMATH_SDK}/include")
 endif()
 
 if (MSVC)

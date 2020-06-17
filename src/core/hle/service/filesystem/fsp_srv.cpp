@@ -316,8 +316,8 @@ public:
             {8, &IFileSystem::OpenFile, "OpenFile"},
             {9, &IFileSystem::OpenDirectory, "OpenDirectory"},
             {10, &IFileSystem::Commit, "Commit"},
-            {11, nullptr, "GetFreeSpaceSize"},
-            {12, nullptr, "GetTotalSpaceSize"},
+            {11, &IFileSystem::GetFreeSpaceSize, "GetFreeSpaceSize"},
+            {12, &IFileSystem::GetTotalSpaceSize, "GetTotalSpaceSize"},
             {13, &IFileSystem::CleanDirectoryRecursively, "CleanDirectoryRecursively"},
             {14, nullptr, "GetFileTimeStampRaw"},
             {15, nullptr, "QueryEntry"},
@@ -575,6 +575,7 @@ private:
                                 0,
                                 user_id->GetSize(),
                                 {},
+                                {},
                             });
 
                             continue;
@@ -594,6 +595,7 @@ private:
                                 save_id_numeric,
                                 stoull_be(title_id->GetName()),
                                 title_id->GetSize(),
+                                {},
                                 {},
                             });
                         }
@@ -618,6 +620,7 @@ private:
                                 stoull_be(type->GetName()),
                                 stoull_be(title_id->GetName()),
                                 title_id->GetSize(),
+                                {},
                                 {},
                             });
                         }
@@ -694,12 +697,14 @@ FSP_SRV::FSP_SRV(FileSystemController& fsc, const Core::Reporter& reporter)
         {68, nullptr, "OpenSaveDataInfoReaderBySaveDataFilter"},
         {69, nullptr, "ReadSaveDataFileSystemExtraDataBySaveDataAttribute"},
         {70, nullptr, "WriteSaveDataFileSystemExtraDataBySaveDataAttribute"},
+        {71, nullptr, "ReadSaveDataFileSystemExtraDataWithMaskBySaveDataAttribute"},
         {80, nullptr, "OpenSaveDataMetaFile"},
         {81, nullptr, "OpenSaveDataTransferManager"},
         {82, nullptr, "OpenSaveDataTransferManagerVersion2"},
         {83, nullptr, "OpenSaveDataTransferProhibiterForCloudBackUp"},
         {84, nullptr, "ListApplicationAccessibleSaveDataOwnerId"},
         {85, nullptr, "OpenSaveDataTransferManagerForSaveDataRepair"},
+        {86, nullptr, "OpenSaveDataMover"},
         {100, nullptr, "OpenImageDirectoryFileSystem"},
         {110, nullptr, "OpenContentStorageFileSystem"},
         {120, nullptr, "OpenCloudBackupWorkStorageFileSystem"},
@@ -759,9 +764,11 @@ FSP_SRV::FSP_SRV(FileSystemController& fsc, const Core::Reporter& reporter)
         {1011, &FSP_SRV::GetAccessLogVersionInfo, "GetAccessLogVersionInfo"},
         {1012, nullptr, "GetFsStackUsage"},
         {1013, nullptr, "UnsetSaveDataRootPath"},
+        {1014, nullptr, "OutputMultiProgramTagAccessLog"},
         {1100, nullptr, "OverrideSaveDataTransferTokenSignVerificationKey"},
         {1110, nullptr, "CorruptSaveDataFileSystemBySaveDataSpaceId2"},
-        {1200, nullptr, "OpenMultiCommitManager"},
+        {1200, &FSP_SRV::OpenMultiCommitManager, "OpenMultiCommitManager"},
+        {1300, nullptr, "OpenBisWiper"},
     };
     // clang-format on
     RegisterHandlers(functions);
@@ -979,6 +986,42 @@ void FSP_SRV::GetAccessLogVersionInfo(Kernel::HLERequestContext& ctx) {
     rb.Push(RESULT_SUCCESS);
     rb.PushEnum(AccessLogVersion::Latest);
     rb.Push(access_log_program_index);
+}
+
+class IMultiCommitManager final : public ServiceFramework<IMultiCommitManager> {
+public:
+    explicit IMultiCommitManager() : ServiceFramework("IMultiCommitManager") {
+        static const FunctionInfo functions[] = {
+            {1, &IMultiCommitManager::Add, "Add"},
+            {2, &IMultiCommitManager::Commit, "Commit"},
+        };
+        RegisterHandlers(functions);
+    }
+
+private:
+    FileSys::VirtualFile backend;
+
+    void Add(Kernel::HLERequestContext& ctx) {
+        LOG_WARNING(Service_FS, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(RESULT_SUCCESS);
+    }
+
+    void Commit(Kernel::HLERequestContext& ctx) {
+        LOG_WARNING(Service_FS, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(RESULT_SUCCESS);
+    }
+};
+
+void FSP_SRV::OpenMultiCommitManager(Kernel::HLERequestContext& ctx) {
+    LOG_DEBUG(Service_FS, "called");
+
+    IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+    rb.Push(RESULT_SUCCESS);
+    rb.PushIpcInterface<IMultiCommitManager>(std::make_shared<IMultiCommitManager>());
 }
 
 } // namespace Service::FileSystem

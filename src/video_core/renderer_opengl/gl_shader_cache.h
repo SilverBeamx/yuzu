@@ -18,12 +18,12 @@
 
 #include "common/common_types.h"
 #include "video_core/engines/shader_type.h"
-#include "video_core/rasterizer_cache.h"
 #include "video_core/renderer_opengl/gl_resource_manager.h"
 #include "video_core/renderer_opengl/gl_shader_decompiler.h"
 #include "video_core/renderer_opengl/gl_shader_disk_cache.h"
 #include "video_core/shader/registry.h"
 #include "video_core/shader/shader_ir.h"
+#include "video_core/shader_cache.h"
 
 namespace Core {
 class System;
@@ -35,16 +35,20 @@ class EmuWindow;
 
 namespace OpenGL {
 
-class CachedShader;
 class Device;
 class RasterizerOpenGL;
 struct UnspecializedShader;
 
-using Shader = std::shared_ptr<CachedShader>;
 using Maxwell = Tegra::Engines::Maxwell3D::Regs;
 
+struct ProgramHandle {
+    OGLProgram source_program;
+    OGLAssemblyProgram assembly_program;
+};
+using ProgramSharedPtr = std::shared_ptr<ProgramHandle>;
+
 struct PrecompiledShader {
-    std::shared_ptr<OGLProgram> program;
+    ProgramSharedPtr program;
     std::shared_ptr<VideoCommon::Shader::Registry> registry;
     ShaderEntries entries;
 };
@@ -58,70 +62,56 @@ struct ShaderParameters {
     u64 unique_identifier;
 };
 
-class CachedShader final : public RasterizerCacheObject {
+class Shader final {
 public:
-    ~CachedShader();
+    ~Shader();
 
     /// Gets the GL program handle for the shader
     GLuint GetHandle() const;
-
-    /// Returns the guest CPU address of the shader
-    VAddr GetCpuAddr() const override {
-        return cpu_addr;
-    }
-
-    /// Returns the size in bytes of the shader
-    std::size_t GetSizeInBytes() const override {
-        return size_in_bytes;
-    }
 
     /// Gets the shader entries for the shader
     const ShaderEntries& GetEntries() const {
         return entries;
     }
 
-    static Shader CreateStageFromMemory(const ShaderParameters& params,
-                                        Maxwell::ShaderProgram program_type,
-                                        ProgramCode program_code, ProgramCode program_code_b);
-    static Shader CreateKernelFromMemory(const ShaderParameters& params, ProgramCode code);
+    static std::unique_ptr<Shader> CreateStageFromMemory(const ShaderParameters& params,
+                                                         Maxwell::ShaderProgram program_type,
+                                                         ProgramCode program_code,
+                                                         ProgramCode program_code_b);
+    static std::unique_ptr<Shader> CreateKernelFromMemory(const ShaderParameters& params,
+                                                          ProgramCode code);
 
-    static Shader CreateFromCache(const ShaderParameters& params,
-                                  const PrecompiledShader& precompiled_shader,
-                                  std::size_t size_in_bytes);
+    static std::unique_ptr<Shader> CreateFromCache(const ShaderParameters& params,
+                                                   const PrecompiledShader& precompiled_shader);
 
 private:
-    explicit CachedShader(const u8* host_ptr, VAddr cpu_addr, std::size_t size_in_bytes,
-                          std::shared_ptr<VideoCommon::Shader::Registry> registry,
-                          ShaderEntries entries, std::shared_ptr<OGLProgram> program);
+    explicit Shader(std::shared_ptr<VideoCommon::Shader::Registry> registry, ShaderEntries entries,
+                    ProgramSharedPtr program);
 
     std::shared_ptr<VideoCommon::Shader::Registry> registry;
     ShaderEntries entries;
-    VAddr cpu_addr = 0;
-    std::size_t size_in_bytes = 0;
-    std::shared_ptr<OGLProgram> program;
+    ProgramSharedPtr program;
+    GLuint handle = 0;
 };
 
-class ShaderCacheOpenGL final : public RasterizerCache<Shader> {
+class ShaderCacheOpenGL final : public VideoCommon::ShaderCache<Shader> {
 public:
     explicit ShaderCacheOpenGL(RasterizerOpenGL& rasterizer, Core::System& system,
                                Core::Frontend::EmuWindow& emu_window, const Device& device);
+    ~ShaderCacheOpenGL() override;
 
     /// Loads disk cache for the current game
     void LoadDiskCache(const std::atomic_bool& stop_loading,
                        const VideoCore::DiskResourceLoadCallback& callback);
 
     /// Gets the current specified shader stage program
-    Shader GetStageProgram(Maxwell::ShaderProgram program);
+    Shader* GetStageProgram(Maxwell::ShaderProgram program);
 
     /// Gets a compute kernel in the passed address
-    Shader GetComputeKernel(GPUVAddr code_addr);
-
-protected:
-    // We do not have to flush this cache as things in it are never modified by us.
-    void FlushObjectInner(const Shader& object) override {}
+    Shader* GetComputeKernel(GPUVAddr code_addr);
 
 private:
-    std::shared_ptr<OGLProgram> GeneratePrecompiledProgram(
+    ProgramSharedPtr GeneratePrecompiledProgram(
         const ShaderDiskCacheEntry& entry, const ShaderDiskCachePrecompiled& precompiled_entry,
         const std::unordered_set<GLenum>& supported_formats);
 
@@ -131,7 +121,10 @@ private:
     ShaderDiskCacheOpenGL disk_cache;
     std::unordered_map<u64, PrecompiledShader> runtime_cache;
 
-    std::array<Shader, Maxwell::MaxShaderProgram> last_shaders;
+    std::unique_ptr<Shader> null_shader;
+    std::unique_ptr<Shader> null_kernel;
+
+    std::array<Shader*, Maxwell::MaxShaderProgram> last_shaders{};
 };
 
 } // namespace OpenGL

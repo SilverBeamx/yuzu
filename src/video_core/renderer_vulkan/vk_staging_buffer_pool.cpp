@@ -13,6 +13,7 @@
 #include "video_core/renderer_vulkan/vk_resource_manager.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
+#include "video_core/renderer_vulkan/wrapper.h"
 
 namespace Vulkan {
 
@@ -38,8 +39,7 @@ VKStagingBufferPool::StagingBuffer& VKStagingBufferPool::StagingBuffer::operator
 
 VKStagingBufferPool::VKStagingBufferPool(const VKDevice& device, VKMemoryManager& memory_manager,
                                          VKScheduler& scheduler)
-    : device{device}, memory_manager{memory_manager}, scheduler{scheduler},
-      is_device_integrated{device.IsIntegrated()} {}
+    : device{device}, memory_manager{memory_manager}, scheduler{scheduler} {}
 
 VKStagingBufferPool::~VKStagingBufferPool() = default;
 
@@ -55,9 +55,7 @@ void VKStagingBufferPool::TickFrame() {
     current_delete_level = (current_delete_level + 1) % NumLevels;
 
     ReleaseCache(true);
-    if (!is_device_integrated) {
-        ReleaseCache(false);
-    }
+    ReleaseCache(false);
 }
 
 VKBuffer* VKStagingBufferPool::TryGetReservedBuffer(std::size_t size, bool host_visible) {
@@ -71,24 +69,30 @@ VKBuffer* VKStagingBufferPool::TryGetReservedBuffer(std::size_t size, bool host_
 }
 
 VKBuffer& VKStagingBufferPool::CreateStagingBuffer(std::size_t size, bool host_visible) {
-    const auto usage =
-        vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst |
-        vk::BufferUsageFlagBits::eUniformBuffer | vk::BufferUsageFlagBits::eStorageBuffer |
-        vk::BufferUsageFlagBits::eIndexBuffer;
     const u32 log2 = Common::Log2Ceil64(size);
-    const vk::BufferCreateInfo buffer_ci({}, 1ULL << log2, usage, vk::SharingMode::eExclusive, 0,
-                                         nullptr);
-    const auto dev = device.GetLogical();
+
+    VkBufferCreateInfo ci;
+    ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    ci.pNext = nullptr;
+    ci.flags = 0;
+    ci.size = 1ULL << log2;
+    ci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+               VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+               VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ci.queueFamilyIndexCount = 0;
+    ci.pQueueFamilyIndices = nullptr;
+
     auto buffer = std::make_unique<VKBuffer>();
-    buffer->handle = dev.createBufferUnique(buffer_ci, nullptr, device.GetDispatchLoader());
-    buffer->commit = memory_manager.Commit(*buffer->handle, host_visible);
+    buffer->handle = device.GetLogical().CreateBuffer(ci);
+    buffer->commit = memory_manager.Commit(buffer->handle, host_visible);
 
     auto& entries = GetCache(host_visible)[log2].entries;
     return *entries.emplace_back(std::move(buffer), scheduler.GetFence(), epoch).buffer;
 }
 
 VKStagingBufferPool::StagingBuffersCache& VKStagingBufferPool::GetCache(bool host_visible) {
-    return is_device_integrated || host_visible ? host_staging_buffers : device_staging_buffers;
+    return host_visible ? host_staging_buffers : device_staging_buffers;
 }
 
 void VKStagingBufferPool::ReleaseCache(bool host_visible) {

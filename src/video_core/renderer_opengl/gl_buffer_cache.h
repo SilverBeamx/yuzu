@@ -10,7 +10,6 @@
 #include "common/common_types.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/engines/maxwell_3d.h"
-#include "video_core/rasterizer_cache.h"
 #include "video_core/renderer_opengl/gl_resource_manager.h"
 #include "video_core/renderer_opengl/gl_stream_buffer.h"
 
@@ -24,42 +23,34 @@ class Device;
 class OGLStreamBuffer;
 class RasterizerOpenGL;
 
-class CachedBufferBlock;
-
-using Buffer = std::shared_ptr<CachedBufferBlock>;
-using GenericBufferCache = VideoCommon::BufferCache<Buffer, GLuint, OGLStreamBuffer>;
-
-class CachedBufferBlock : public VideoCommon::BufferBlock {
+class Buffer : public VideoCommon::BufferBlock {
 public:
-    explicit CachedBufferBlock(CacheAddr cache_addr, const std::size_t size);
-    ~CachedBufferBlock();
+    explicit Buffer(VAddr cpu_addr, const std::size_t size);
+    ~Buffer();
 
-    const GLuint* GetHandle() const {
-        return &gl_buffer.handle;
+    GLuint Handle() const {
+        return gl_buffer.handle;
     }
 
 private:
-    OGLBuffer gl_buffer{};
+    OGLBuffer gl_buffer;
 };
 
+using GenericBufferCache = VideoCommon::BufferCache<Buffer, GLuint, OGLStreamBuffer>;
 class OGLBufferCache final : public GenericBufferCache {
 public:
     explicit OGLBufferCache(RasterizerOpenGL& rasterizer, Core::System& system,
                             const Device& device, std::size_t stream_size);
     ~OGLBufferCache();
 
-    const GLuint* GetEmptyBuffer(std::size_t) override;
+    GLuint GetEmptyBuffer(std::size_t) override;
 
     void Acquire() noexcept {
         cbuf_cursor = 0;
     }
 
 protected:
-    Buffer CreateBlock(CacheAddr cache_addr, std::size_t size) override;
-
-    void WriteBarrier() override;
-
-    const GLuint* ToHandle(const Buffer& buffer) override;
+    std::shared_ptr<Buffer> CreateBlock(VAddr cpu_addr, std::size_t size) override;
 
     void UploadBlockData(const Buffer& buffer, std::size_t offset, std::size_t size,
                          const u8* data) override;

@@ -13,6 +13,7 @@
 #include "video_core/engines/shader_bytecode.h"
 #include "video_core/engines/shader_header.h"
 #include "video_core/shader/control_flow.h"
+#include "video_core/shader/memory_util.h"
 #include "video_core/shader/node_helper.h"
 #include "video_core/shader/shader_ir.h"
 
@@ -23,17 +24,6 @@ using Tegra::Shader::OpCode;
 
 namespace {
 
-/**
- * Returns whether the instruction at the specified offset is a 'sched' instruction.
- * Sched instructions always appear before a sequence of 3 instructions.
- */
-constexpr bool IsSchedInstruction(u32 offset, u32 main_offset) {
-    constexpr u32 SchedPeriod = 4;
-    u32 absolute_offset = offset - main_offset;
-
-    return (absolute_offset % SchedPeriod) == 0;
-}
-
 void DeduceTextureHandlerSize(VideoCore::GuestDriverProfile& gpu_driver,
                               const std::list<Sampler>& used_samplers) {
     if (gpu_driver.IsTextureHandlerSizeKnown() || used_samplers.size() <= 1) {
@@ -42,11 +32,11 @@ void DeduceTextureHandlerSize(VideoCore::GuestDriverProfile& gpu_driver,
     u32 count{};
     std::vector<u32> bound_offsets;
     for (const auto& sampler : used_samplers) {
-        if (sampler.IsBindless()) {
+        if (sampler.is_bindless) {
             continue;
         }
         ++count;
-        bound_offsets.emplace_back(sampler.GetOffset());
+        bound_offsets.emplace_back(sampler.offset);
     }
     if (count > 1) {
         gpu_driver.DeduceTextureHandlerSize(std::move(bound_offsets));
@@ -56,14 +46,14 @@ void DeduceTextureHandlerSize(VideoCore::GuestDriverProfile& gpu_driver,
 std::optional<u32> TryDeduceSamplerSize(const Sampler& sampler_to_deduce,
                                         VideoCore::GuestDriverProfile& gpu_driver,
                                         const std::list<Sampler>& used_samplers) {
-    const u32 base_offset = sampler_to_deduce.GetOffset();
+    const u32 base_offset = sampler_to_deduce.offset;
     u32 max_offset{std::numeric_limits<u32>::max()};
     for (const auto& sampler : used_samplers) {
-        if (sampler.IsBindless()) {
+        if (sampler.is_bindless) {
             continue;
         }
-        if (sampler.GetOffset() > base_offset) {
-            max_offset = std::min(sampler.GetOffset(), max_offset);
+        if (sampler.offset > base_offset) {
+            max_offset = std::min(sampler.offset, max_offset);
         }
     }
     if (max_offset == std::numeric_limits<u32>::max()) {
@@ -265,7 +255,7 @@ void ShaderIR::InsertControlFlow(NodeBlock& bb, const ShaderBlock& block) {
         Node n = Operation(OperationCode::Branch, Immediate(branch_case.address));
         Node op_b = Immediate(branch_case.cmp_value);
         Node condition =
-            GetPredicateComparisonInteger(Tegra::Shader::PredCondition::Equal, false, op_a, op_b);
+            GetPredicateComparisonInteger(Tegra::Shader::PredCondition::EQ, false, op_a, op_b);
         auto result = Conditional(condition, {n});
         bb.push_back(result);
         global_code.push_back(result);
@@ -363,14 +353,14 @@ void ShaderIR::PostDecode() {
         return;
     }
     for (auto& sampler : used_samplers) {
-        if (!sampler.IsIndexed()) {
+        if (!sampler.is_indexed) {
             continue;
         }
         if (const auto size = TryDeduceSamplerSize(sampler, gpu_driver, used_samplers)) {
-            sampler.SetSize(*size);
+            sampler.size = *size;
         } else {
             LOG_CRITICAL(HW_GPU, "Failed to deduce size of indexed sampler");
-            sampler.SetSize(1);
+            sampler.size = 1;
         }
     }
 }

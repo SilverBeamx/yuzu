@@ -376,6 +376,12 @@ enum class RendererBackend {
     Vulkan = 1,
 };
 
+enum class GPUAccuracy : u32 {
+    Normal = 0,
+    High = 1,
+    Extreme = 2,
+};
+
 struct Values {
     // System
     bool use_docked_mode;
@@ -388,6 +394,7 @@ struct Values {
     s32 current_user;
     s32 language_index;
     s32 region_index;
+    s32 time_zone_index;
     s32 sound_index;
 
     // Controls
@@ -430,16 +437,18 @@ struct Values {
     bool renderer_debug;
     int vulkan_device;
 
-    float resolution_factor;
+    u16 resolution_factor{1};
     int aspect_ratio;
     int max_anisotropy;
     bool use_frame_limit;
     u16 frame_limit;
     bool use_disk_shader_cache;
-    bool use_accurate_gpu_emulation;
+    GPUAccuracy gpu_accuracy;
     bool use_asynchronous_gpu_emulation;
     bool use_vsync;
+    bool use_assembly_shaders;
     bool force_30fps_mode;
+    bool use_fast_gpu_time;
 
     float bg_red;
     float bg_green;
@@ -464,6 +473,8 @@ struct Values {
     bool dump_nso;
     bool reporting_services;
     bool quest_flag;
+    bool disable_cpu_opt;
+    bool disable_macro_jit;
 
     // BCAT
     std::string bcat_backend;
@@ -479,6 +490,12 @@ struct Values {
     std::map<u64, std::vector<std::string>> disabled_addons;
 } extern values;
 
+bool IsGPULevelExtreme();
+bool IsGPULevelHigh();
+
+std::string GetTimeZoneString();
+
 void Apply();
 void LogSettings();
+
 } // namespace Settings

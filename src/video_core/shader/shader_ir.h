@@ -18,6 +18,7 @@
 #include "video_core/engines/shader_header.h"
 #include "video_core/shader/ast.h"
 #include "video_core/shader/compiler_settings.h"
+#include "video_core/shader/memory_util.h"
 #include "video_core/shader/node.h"
 #include "video_core/shader/registry.h"
 
@@ -25,16 +26,13 @@ namespace VideoCommon::Shader {
 
 struct ShaderBlock;
 
-using ProgramCode = std::vector<u64>;
-
 constexpr u32 MAX_PROGRAM_LENGTH = 0x1000;
 
-class ConstBuffer {
-public:
-    explicit ConstBuffer(u32 max_offset, bool is_indirect)
+struct ConstBuffer {
+    constexpr explicit ConstBuffer(u32 max_offset, bool is_indirect)
         : max_offset{max_offset}, is_indirect{is_indirect} {}
 
-    ConstBuffer() = default;
+    constexpr ConstBuffer() = default;
 
     void MarkAsUsed(u64 offset) {
         max_offset = std::max(max_offset, static_cast<u32>(offset));
@@ -57,8 +55,8 @@ public:
     }
 
 private:
-    u32 max_offset{};
-    bool is_indirect{};
+    u32 max_offset = 0;
+    bool is_indirect = false;
 };
 
 struct GlobalMemoryUsage {
@@ -192,10 +190,14 @@ private:
     friend class ASTDecoder;
 
     struct SamplerInfo {
-        Tegra::Shader::TextureType type;
-        bool is_array;
-        bool is_shadow;
-        bool is_buffer;
+        std::optional<Tegra::Shader::TextureType> type;
+        std::optional<bool> is_array;
+        std::optional<bool> is_shadow;
+        std::optional<bool> is_buffer;
+
+        constexpr bool IsComplete() const noexcept {
+            return type && is_array && is_shadow && is_buffer;
+        }
     };
 
     void Decode();
@@ -312,6 +314,10 @@ private:
     /// Conditionally saturates a half float pair
     Node GetSaturatedHalfFloat(Node value, bool saturate = true);
 
+    /// Get image component value by type and size
+    std::pair<Node, bool> GetComponentValue(Tegra::Texture::ComponentType component_type,
+                                            u32 component_size, Node original_value);
+
     /// Returns a predicate comparing two floats
     Node GetPredicateComparisonFloat(Tegra::Shader::PredCondition condition, Node op_a, Node op_b);
     /// Returns a predicate comparing two integers
@@ -324,16 +330,15 @@ private:
     OperationCode GetPredicateCombiner(Tegra::Shader::PredOperation operation);
 
     /// Queries the missing sampler info from the execution context.
-    SamplerInfo GetSamplerInfo(std::optional<SamplerInfo> sampler_info, u32 offset,
-                               std::optional<u32> buffer = std::nullopt);
+    SamplerInfo GetSamplerInfo(SamplerInfo info,
+                               std::optional<Tegra::Engines::SamplerDescriptor> sampler);
 
-    /// Accesses a texture sampler
-    const Sampler* GetSampler(const Tegra::Shader::Sampler& sampler,
-                              std::optional<SamplerInfo> sampler_info = std::nullopt);
+    /// Accesses a texture sampler.
+    std::optional<Sampler> GetSampler(Tegra::Shader::Sampler sampler, SamplerInfo info);
 
     /// Accesses a texture sampler for a bindless texture.
-    const Sampler* GetBindlessSampler(Tegra::Shader::Register reg, Node& index_var,
-                                      std::optional<SamplerInfo> sampler_info = std::nullopt);
+    std::optional<Sampler> GetBindlessSampler(Tegra::Shader::Register reg, SamplerInfo info,
+                                              Node& index_var);
 
     /// Accesses an image.
     Image& GetImage(Tegra::Shader::Image image, Tegra::Shader::ImageType type);
@@ -349,6 +354,9 @@ private:
 
     /// Marks the usage of a input or output attribute.
     void MarkAttributeUsage(Tegra::Shader::Attribute::Index index, u64 element);
+
+    /// Decodes VMNMX instruction and inserts its code into the passed basic block.
+    void DecodeVMNMX(NodeBlock& bb, Tegra::Shader::Instruction instr);
 
     void WriteTexInstructionFloat(NodeBlock& bb, Tegra::Shader::Instruction instr,
                                   const Node4& components);
@@ -401,8 +409,14 @@ private:
 
     std::tuple<Node, u32, u32> TrackCbuf(Node tracked, const NodeBlock& code, s64 cursor) const;
 
-    std::tuple<Node, TrackSampler> TrackBindlessSampler(Node tracked, const NodeBlock& code,
-                                                        s64 cursor);
+    std::pair<Node, TrackSampler> TrackBindlessSampler(Node tracked, const NodeBlock& code,
+                                                       s64 cursor);
+
+    std::pair<Node, TrackSampler> HandleBindlessIndirectRead(const CbufNode& cbuf,
+                                                             const OperationNode& operation,
+                                                             Node gpr, Node base_offset,
+                                                             Node tracked, const NodeBlock& code,
+                                                             s64 cursor);
 
     std::optional<u32> TrackImmediate(Node tracked, const NodeBlock& code, s64 cursor) const;
 

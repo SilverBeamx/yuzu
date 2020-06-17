@@ -14,6 +14,7 @@
 namespace VideoCommon::Shader {
 
 namespace {
+
 std::pair<Node, s64> FindOperation(const NodeBlock& code, s64 cursor,
                                    OperationCode operation_code) {
     for (; cursor >= 0; --cursor) {
@@ -27,8 +28,9 @@ std::pair<Node, s64> FindOperation(const NodeBlock& code, s64 cursor,
 
         if (const auto conditional = std::get_if<ConditionalNode>(&*node)) {
             const auto& conditional_code = conditional->GetCode();
-            auto [found, internal_cursor] = FindOperation(
+            auto result = FindOperation(
                 conditional_code, static_cast<s64>(conditional_code.size() - 1), operation_code);
+            auto& found = result.first;
             if (found) {
                 return {std::move(found), cursor};
             }
@@ -62,7 +64,8 @@ bool AmendNodeCv(std::size_t amend_index, Node node) {
     if (const auto operation = std::get_if<OperationNode>(&*node)) {
         operation->SetAmendIndex(amend_index);
         return true;
-    } else if (const auto conditional = std::get_if<ConditionalNode>(&*node)) {
+    }
+    if (const auto conditional = std::get_if<ConditionalNode>(&*node)) {
         conditional->SetAmendIndex(amend_index);
         return true;
     }
@@ -71,39 +74,27 @@ bool AmendNodeCv(std::size_t amend_index, Node node) {
 
 } // Anonymous namespace
 
-std::tuple<Node, TrackSampler> ShaderIR::TrackBindlessSampler(Node tracked, const NodeBlock& code,
-                                                              s64 cursor) {
+std::pair<Node, TrackSampler> ShaderIR::TrackBindlessSampler(Node tracked, const NodeBlock& code,
+                                                             s64 cursor) {
     if (const auto cbuf = std::get_if<CbufNode>(&*tracked)) {
-        // Constant buffer found, test if it's an immediate
-        const auto offset = cbuf->GetOffset();
-        if (const auto immediate = std::get_if<ImmediateNode>(&*offset)) {
-            auto track =
-                MakeTrackSampler<BindlessSamplerNode>(cbuf->GetIndex(), immediate->GetValue());
-            return {tracked, track};
-        } else if (const auto operation = std::get_if<OperationNode>(&*offset)) {
-            const u32 bound_buffer = registry.GetBoundBuffer();
-            if (bound_buffer != cbuf->GetIndex()) {
-                return {};
-            }
-            const auto pair = DecoupleIndirectRead(*operation);
-            if (!pair) {
-                return {};
-            }
-            auto [gpr, base_offset] = *pair;
-            const auto offset_inm = std::get_if<ImmediateNode>(&*base_offset);
-            const auto& gpu_driver = registry.AccessGuestDriverProfile();
-            const u32 bindless_cv = NewCustomVariable();
-            const Node op =
-                Operation(OperationCode::UDiv, gpr, Immediate(gpu_driver.GetTextureHandlerSize()));
+        const u32 cbuf_index = cbuf->GetIndex();
 
-            const Node cv_node = GetCustomVariable(bindless_cv);
-            Node amend_op = Operation(OperationCode::Assign, cv_node, std::move(op));
-            const std::size_t amend_index = DeclareAmend(amend_op);
-            AmendNodeCv(amend_index, code[cursor]);
-            // TODO Implement Bindless Index custom variable
-            auto track = MakeTrackSampler<ArraySamplerNode>(cbuf->GetIndex(),
-                                                            offset_inm->GetValue(), bindless_cv);
+        // Constant buffer found, test if it's an immediate
+        const auto& offset = cbuf->GetOffset();
+        if (const auto immediate = std::get_if<ImmediateNode>(&*offset)) {
+            auto track = MakeTrackSampler<BindlessSamplerNode>(cbuf_index, immediate->GetValue());
             return {tracked, track};
+        }
+        if (const auto operation = std::get_if<OperationNode>(&*offset)) {
+            const u32 bound_buffer = registry.GetBoundBuffer();
+            if (bound_buffer != cbuf_index) {
+                return {};
+            }
+            if (const std::optional pair = DecoupleIndirectRead(*operation)) {
+                auto [gpr, base_offset] = *pair;
+                return HandleBindlessIndirectRead(*cbuf, *operation, gpr, base_offset, tracked,
+                                                  code, cursor);
+            }
         }
         return {};
     }
@@ -120,10 +111,23 @@ std::tuple<Node, TrackSampler> ShaderIR::TrackBindlessSampler(Node tracked, cons
         return TrackBindlessSampler(source, code, new_cursor);
     }
     if (const auto operation = std::get_if<OperationNode>(&*tracked)) {
-        for (std::size_t i = operation->GetOperandsCount(); i > 0; --i) {
-            if (auto found = TrackBindlessSampler((*operation)[i - 1], code, cursor);
-                std::get<0>(found)) {
-                // Cbuf found in operand.
+        const OperationNode& op = *operation;
+
+        const OperationCode opcode = operation->GetCode();
+        if (opcode == OperationCode::IBitwiseOr || opcode == OperationCode::UBitwiseOr) {
+            ASSERT(op.GetOperandsCount() == 2);
+            auto [node_a, index_a, offset_a] = TrackCbuf(op[0], code, cursor);
+            auto [node_b, index_b, offset_b] = TrackCbuf(op[1], code, cursor);
+            if (node_a && node_b) {
+                auto track = MakeTrackSampler<SeparateSamplerNode>(std::pair{index_a, index_b},
+                                                                   std::pair{offset_a, offset_b});
+                return {tracked, std::move(track)};
+            }
+        }
+        std::size_t i = op.GetOperandsCount();
+        while (i--) {
+            if (auto found = TrackBindlessSampler(op[i - 1], code, cursor); std::get<0>(found)) {
+                // Constant buffer found in operand.
                 return found;
             }
         }
@@ -137,11 +141,31 @@ std::tuple<Node, TrackSampler> ShaderIR::TrackBindlessSampler(Node tracked, cons
     return {};
 }
 
+std::pair<Node, TrackSampler> ShaderIR::HandleBindlessIndirectRead(
+    const CbufNode& cbuf, const OperationNode& operation, Node gpr, Node base_offset, Node tracked,
+    const NodeBlock& code, s64 cursor) {
+    const auto offset_imm = std::get<ImmediateNode>(*base_offset);
+    const auto& gpu_driver = registry.AccessGuestDriverProfile();
+    const u32 bindless_cv = NewCustomVariable();
+    const u32 texture_handler_size = gpu_driver.GetTextureHandlerSize();
+    Node op = Operation(OperationCode::UDiv, gpr, Immediate(texture_handler_size));
+
+    Node cv_node = GetCustomVariable(bindless_cv);
+    Node amend_op = Operation(OperationCode::Assign, std::move(cv_node), std::move(op));
+    const std::size_t amend_index = DeclareAmend(std::move(amend_op));
+    AmendNodeCv(amend_index, code[cursor]);
+
+    // TODO: Implement bindless index custom variable
+    auto track =
+        MakeTrackSampler<ArraySamplerNode>(cbuf.GetIndex(), offset_imm.GetValue(), bindless_cv);
+    return {tracked, track};
+}
+
 std::tuple<Node, u32, u32> ShaderIR::TrackCbuf(Node tracked, const NodeBlock& code,
                                                s64 cursor) const {
     if (const auto cbuf = std::get_if<CbufNode>(&*tracked)) {
         // Constant buffer found, test if it's an immediate
-        const auto offset = cbuf->GetOffset();
+        const auto& offset = cbuf->GetOffset();
         if (const auto immediate = std::get_if<ImmediateNode>(&*offset)) {
             return {tracked, cbuf->GetIndex(), immediate->GetValue()};
         }
@@ -151,21 +175,13 @@ std::tuple<Node, u32, u32> ShaderIR::TrackCbuf(Node tracked, const NodeBlock& co
         if (gpr->GetIndex() == Tegra::Shader::Register::ZeroIndex) {
             return {};
         }
-        s64 current_cursor = cursor;
-        while (current_cursor > 0) {
-            // Reduce the cursor in one to avoid infinite loops when the instruction sets the same
-            // register that it uses as operand
-            const auto [source, new_cursor] = TrackRegister(gpr, code, current_cursor - 1);
-            current_cursor = new_cursor;
-            if (!source) {
-                continue;
-            }
-            const auto [base_address, index, offset] = TrackCbuf(source, code, current_cursor);
-            if (base_address != nullptr) {
-                return {base_address, index, offset};
-            }
+        // Reduce the cursor in one to avoid infinite loops when the instruction sets the same
+        // register that it uses as operand
+        const auto [source, new_cursor] = TrackRegister(gpr, code, cursor - 1);
+        if (!source) {
+            return {};
         }
-        return {};
+        return TrackCbuf(source, code, new_cursor);
     }
     if (const auto operation = std::get_if<OperationNode>(&*tracked)) {
         for (std::size_t i = operation->GetOperandsCount(); i > 0; --i) {
@@ -186,8 +202,8 @@ std::tuple<Node, u32, u32> ShaderIR::TrackCbuf(Node tracked, const NodeBlock& co
 std::optional<u32> ShaderIR::TrackImmediate(Node tracked, const NodeBlock& code, s64 cursor) const {
     // Reduce the cursor in one to avoid infinite loops when the instruction sets the same register
     // that it uses as operand
-    const auto [found, found_cursor] =
-        TrackRegister(&std::get<GprNode>(*tracked), code, cursor - 1);
+    const auto result = TrackRegister(&std::get<GprNode>(*tracked), code, cursor - 1);
+    const auto& found = result.first;
     if (!found) {
         return {};
     }

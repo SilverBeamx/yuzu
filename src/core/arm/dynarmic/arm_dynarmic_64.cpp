@@ -8,6 +8,7 @@
 #include <dynarmic/A64/config.h>
 #include "common/logging/log.h"
 #include "common/microprofile.h"
+#include "common/page_table.h"
 #include "core/arm/dynarmic/arm_dynarmic_64.h"
 #include "core/core.h"
 #include "core/core_manager.h"
@@ -18,8 +19,8 @@
 #include "core/hle/kernel/process.h"
 #include "core/hle/kernel/scheduler.h"
 #include "core/hle/kernel/svc.h"
-#include "core/hle/kernel/vm_manager.h"
 #include "core/memory.h"
+#include "core/settings.h"
 
 namespace Core {
 
@@ -103,7 +104,7 @@ public:
     }
 
     void CallSVC(u32 swi) override {
-        Kernel::CallSVC(parent.system, swi);
+        Kernel::Svc::Call(parent.system, swi);
     }
 
     void AddTicks(u64 ticks) override {
@@ -144,6 +145,8 @@ std::shared_ptr<Dynarmic::A64::Jit> ARM_Dynarmic_64::MakeJit(Common::PageTable& 
     config.page_table_address_space_bits = address_space_bits;
     config.silently_mirror_page_table = false;
     config.absolute_offset_page_table = true;
+    config.detect_misaligned_access_via_page_table = 16 | 32 | 64 | 128;
+    config.only_detect_misalignment_via_page_table_on_page_boundary = true;
 
     // Multi-process state
     config.processor_id = core_index;
@@ -158,6 +161,12 @@ std::shared_ptr<Dynarmic::A64::Jit> ARM_Dynarmic_64::MakeJit(Common::PageTable& 
 
     // Unpredictable instructions
     config.define_unpredictable_behaviour = true;
+
+    // Optimizations
+    if (Settings::values.disable_cpu_opt) {
+        config.enable_optimizations = false;
+        config.enable_fast_dispatch = false;
+    }
 
     return std::make_shared<Dynarmic::A64::Jit>(config);
 }
@@ -176,10 +185,9 @@ void ARM_Dynarmic_64::Step() {
 
 ARM_Dynarmic_64::ARM_Dynarmic_64(System& system, ExclusiveMonitor& exclusive_monitor,
                                  std::size_t core_index)
-    : ARM_Interface{system},
-      cb(std::make_unique<DynarmicCallbacks64>(*this)), inner_unicorn{system},
-      core_index{core_index}, exclusive_monitor{
-                                  dynamic_cast<DynarmicExclusiveMonitor&>(exclusive_monitor)} {}
+    : ARM_Interface{system}, cb(std::make_unique<DynarmicCallbacks64>(*this)),
+      inner_unicorn{system, ARM_Unicorn::Arch::AArch64}, core_index{core_index},
+      exclusive_monitor{dynamic_cast<DynarmicExclusiveMonitor&>(exclusive_monitor)} {}
 
 ARM_Dynarmic_64::~ARM_Dynarmic_64() = default;
 

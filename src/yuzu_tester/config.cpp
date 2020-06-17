@@ -116,8 +116,6 @@ void Config::ReadValues() {
     Settings::values.use_multi_core = sdl2_config->GetBoolean("Core", "use_multi_core", false);
 
     // Renderer
-    Settings::values.resolution_factor =
-        static_cast<float>(sdl2_config->GetReal("Renderer", "resolution_factor", 1.0));
     Settings::values.aspect_ratio =
         static_cast<int>(sdl2_config->GetInteger("Renderer", "aspect_ratio", 0));
     Settings::values.max_anisotropy =
@@ -126,10 +124,12 @@ void Config::ReadValues() {
     Settings::values.frame_limit = 100;
     Settings::values.use_disk_shader_cache =
         sdl2_config->GetBoolean("Renderer", "use_disk_shader_cache", false);
-    Settings::values.use_accurate_gpu_emulation =
-        sdl2_config->GetBoolean("Renderer", "use_accurate_gpu_emulation", false);
+    const int gpu_accuracy_level = sdl2_config->GetInteger("Renderer", "gpu_accuracy", 0);
+    Settings::values.gpu_accuracy = static_cast<Settings::GPUAccuracy>(gpu_accuracy_level);
     Settings::values.use_asynchronous_gpu_emulation =
         sdl2_config->GetBoolean("Renderer", "use_asynchronous_gpu_emulation", false);
+    Settings::values.use_fast_gpu_time =
+        sdl2_config->GetBoolean("Renderer", "use_fast_gpu_time", true);
 
     Settings::values.bg_red = static_cast<float>(sdl2_config->GetReal("Renderer", "bg_red", 0.0));
     Settings::values.bg_green =

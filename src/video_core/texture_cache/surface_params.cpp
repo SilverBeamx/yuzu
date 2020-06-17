@@ -81,7 +81,7 @@ SurfaceParams SurfaceParams::CreateForTexture(const FormatLookupTable& lookup_ta
     params.pixel_format = lookup_table.GetPixelFormat(
         tic.format, params.srgb_conversion, tic.r_type, tic.g_type, tic.b_type, tic.a_type);
     params.type = GetFormatType(params.pixel_format);
-    if (entry.IsShadow() && params.type == SurfaceType::ColorTexture) {
+    if (entry.is_shadow && params.type == SurfaceType::ColorTexture) {
         switch (params.pixel_format) {
         case PixelFormat::R16U:
         case PixelFormat::R16F:
@@ -108,15 +108,13 @@ SurfaceParams SurfaceParams::CreateForTexture(const FormatLookupTable& lookup_ta
         params.emulated_levels = 1;
         params.is_layered = false;
     } else {
-        params.target = TextureTypeToSurfaceTarget(entry.GetType(), entry.IsArray());
+        params.target = TextureTypeToSurfaceTarget(entry.type, entry.is_array);
         params.width = tic.Width();
         params.height = tic.Height();
         params.depth = tic.Depth();
         params.pitch = params.is_tiled ? 0 : tic.Pitch();
-        if (params.target == SurfaceTarget::Texture2D && params.depth > 1) {
-            params.depth = 1;
-        } else if (params.target == SurfaceTarget::TextureCubemap ||
-                   params.target == SurfaceTarget::TextureCubeArray) {
+        if (params.target == SurfaceTarget::TextureCubemap ||
+            params.target == SurfaceTarget::TextureCubeArray) {
             params.depth *= 6;
         }
         params.num_levels = tic.max_mip_level + 1;
@@ -140,7 +138,7 @@ SurfaceParams SurfaceParams::CreateForImage(const FormatLookupTable& lookup_tabl
         tic.format, params.srgb_conversion, tic.r_type, tic.g_type, tic.b_type, tic.a_type);
     params.type = GetFormatType(params.pixel_format);
     params.type = GetFormatType(params.pixel_format);
-    params.target = ImageTypeToSurfaceTarget(entry.GetType());
+    params.target = ImageTypeToSurfaceTarget(entry.type);
     // TODO: on 1DBuffer we should use the tic info.
     if (tic.IsBuffer()) {
         params.target = SurfaceTarget::TextureBuffer;
@@ -169,7 +167,6 @@ SurfaceParams SurfaceParams::CreateForImage(const FormatLookupTable& lookup_tabl
 
 SurfaceParams SurfaceParams::CreateForDepthBuffer(Core::System& system) {
     const auto& regs = system.GPU().Maxwell3D().regs;
-    regs.zeta_width, regs.zeta_height, regs.zeta.format, regs.zeta.memory_layout.type;
     SurfaceParams params;
     params.is_tiled = regs.zeta.memory_layout.type ==
                       Tegra::Engines::Maxwell3D::Regs::InvMemoryLayout::BlockLinear;
@@ -218,10 +215,19 @@ SurfaceParams SurfaceParams::CreateForFramebuffer(Core::System& system, std::siz
     params.num_levels = 1;
     params.emulated_levels = 1;
 
-    const bool is_layered = config.layers > 1 && params.block_depth == 0;
-    params.is_layered = is_layered;
-    params.depth = is_layered ? config.layers.Value() : 1;
-    params.target = is_layered ? SurfaceTarget::Texture2DArray : SurfaceTarget::Texture2D;
+    if (config.memory_layout.is_3d != 0) {
+        params.depth = config.layers.Value();
+        params.is_layered = false;
+        params.target = SurfaceTarget::Texture3D;
+    } else if (config.layers > 1) {
+        params.depth = config.layers.Value();
+        params.is_layered = true;
+        params.target = SurfaceTarget::Texture2DArray;
+    } else {
+        params.depth = 1;
+        params.is_layered = false;
+        params.target = SurfaceTarget::Texture2D;
+    }
     return params;
 }
 
@@ -240,7 +246,7 @@ SurfaceParams SurfaceParams::CreateForFermiCopySurface(
     params.width = config.width;
     params.height = config.height;
     params.pitch = config.pitch;
-    // TODO(Rodrigo): Try to guess the surface target from depth and layer parameters
+    // TODO(Rodrigo): Try to guess texture arrays from parameters
     params.target = SurfaceTarget::Texture2D;
     params.depth = 1;
     params.num_levels = 1;
@@ -251,12 +257,12 @@ SurfaceParams SurfaceParams::CreateForFermiCopySurface(
 
 VideoCore::Surface::SurfaceTarget SurfaceParams::ExpectedTarget(
     const VideoCommon::Shader::Sampler& entry) {
-    return TextureTypeToSurfaceTarget(entry.GetType(), entry.IsArray());
+    return TextureTypeToSurfaceTarget(entry.type, entry.is_array);
 }
 
 VideoCore::Surface::SurfaceTarget SurfaceParams::ExpectedTarget(
     const VideoCommon::Shader::Image& entry) {
-    return ImageTypeToSurfaceTarget(entry.GetType());
+    return ImageTypeToSurfaceTarget(entry.type);
 }
 
 bool SurfaceParams::IsLayered() const {

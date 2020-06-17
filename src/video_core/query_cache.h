@@ -12,10 +12,12 @@
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "common/assert.h"
 #include "core/core.h"
+#include "core/settings.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
@@ -98,12 +100,12 @@ public:
                                                       static_cast<QueryCache&>(*this),
                                                       VideoCore::QueryType::SamplesPassed}}} {}
 
-    void InvalidateRegion(CacheAddr addr, std::size_t size) {
+    void InvalidateRegion(VAddr addr, std::size_t size) {
         std::unique_lock lock{mutex};
         FlushAndRemoveRegion(addr, size);
     }
 
-    void FlushRegion(CacheAddr addr, std::size_t size) {
+    void FlushRegion(VAddr addr, std::size_t size) {
         std::unique_lock lock{mutex};
         FlushAndRemoveRegion(addr, size);
     }
@@ -117,17 +119,22 @@ public:
     void Query(GPUVAddr gpu_addr, VideoCore::QueryType type, std::optional<u64> timestamp) {
         std::unique_lock lock{mutex};
         auto& memory_manager = system.GPU().MemoryManager();
-        const auto host_ptr = memory_manager.GetPointer(gpu_addr);
+        const std::optional<VAddr> cpu_addr_opt = memory_manager.GpuToCpuAddress(gpu_addr);
+        ASSERT(cpu_addr_opt);
+        VAddr cpu_addr = *cpu_addr_opt;
 
-        CachedQuery* query = TryGet(ToCacheAddr(host_ptr));
+        CachedQuery* query = TryGet(cpu_addr);
         if (!query) {
-            const auto cpu_addr = memory_manager.GpuToCpuAddress(gpu_addr);
-            ASSERT_OR_EXECUTE(cpu_addr, return;);
+            ASSERT_OR_EXECUTE(cpu_addr_opt, return;);
+            const auto host_ptr = memory_manager.GetPointer(gpu_addr);
 
-            query = Register(type, *cpu_addr, host_ptr, timestamp.has_value());
+            query = Register(type, cpu_addr, host_ptr, timestamp.has_value());
         }
 
         query->BindCounter(Stream(type).Current(), timestamp);
+        if (Settings::values.use_asynchronous_gpu_emulation) {
+            AsyncFlushQuery(cpu_addr);
+        }
     }
 
     /// Updates counters from GPU state. Expected to be called once per draw, clear or dispatch.
@@ -168,16 +175,47 @@ public:
         return streams[static_cast<std::size_t>(type)];
     }
 
+    void CommitAsyncFlushes() {
+        committed_flushes.push_back(uncommitted_flushes);
+        uncommitted_flushes.reset();
+    }
+
+    bool HasUncommittedFlushes() const {
+        return uncommitted_flushes != nullptr;
+    }
+
+    bool ShouldWaitAsyncFlushes() const {
+        if (committed_flushes.empty()) {
+            return false;
+        }
+        return committed_flushes.front() != nullptr;
+    }
+
+    void PopAsyncFlushes() {
+        if (committed_flushes.empty()) {
+            return;
+        }
+        auto& flush_list = committed_flushes.front();
+        if (!flush_list) {
+            committed_flushes.pop_front();
+            return;
+        }
+        for (VAddr query_address : *flush_list) {
+            FlushAndRemoveRegion(query_address, 4);
+        }
+        committed_flushes.pop_front();
+    }
+
 protected:
     std::array<QueryPool, VideoCore::NumQueryTypes> query_pools;
 
 private:
     /// Flushes a memory range to guest memory and removes it from the cache.
-    void FlushAndRemoveRegion(CacheAddr addr, std::size_t size) {
+    void FlushAndRemoveRegion(VAddr addr, std::size_t size) {
         const u64 addr_begin = static_cast<u64>(addr);
         const u64 addr_end = addr_begin + static_cast<u64>(size);
         const auto in_range = [addr_begin, addr_end](CachedQuery& query) {
-            const u64 cache_begin = query.GetCacheAddr();
+            const u64 cache_begin = query.GetCpuAddr();
             const u64 cache_end = cache_begin + query.SizeInBytes();
             return cache_begin < addr_end && addr_begin < cache_end;
         };
@@ -193,7 +231,7 @@ private:
                 if (!in_range(query)) {
                     continue;
                 }
-                rasterizer.UpdatePagesCachedCount(query.CpuAddr(), query.SizeInBytes(), -1);
+                rasterizer.UpdatePagesCachedCount(query.GetCpuAddr(), query.SizeInBytes(), -1);
                 query.Flush();
             }
             contents.erase(std::remove_if(std::begin(contents), std::end(contents), in_range),
@@ -204,23 +242,29 @@ private:
     /// Registers the passed parameters as cached and returns a pointer to the stored cached query.
     CachedQuery* Register(VideoCore::QueryType type, VAddr cpu_addr, u8* host_ptr, bool timestamp) {
         rasterizer.UpdatePagesCachedCount(cpu_addr, CachedQuery::SizeInBytes(timestamp), 1);
-        const u64 page = static_cast<u64>(ToCacheAddr(host_ptr)) >> PAGE_SHIFT;
+        const u64 page = static_cast<u64>(cpu_addr) >> PAGE_SHIFT;
         return &cached_queries[page].emplace_back(static_cast<QueryCache&>(*this), type, cpu_addr,
                                                   host_ptr);
     }
 
     /// Tries to a get a cached query. Returns nullptr on failure.
-    CachedQuery* TryGet(CacheAddr addr) {
+    CachedQuery* TryGet(VAddr addr) {
         const u64 page = static_cast<u64>(addr) >> PAGE_SHIFT;
         const auto it = cached_queries.find(page);
         if (it == std::end(cached_queries)) {
             return nullptr;
         }
         auto& contents = it->second;
-        const auto found =
-            std::find_if(std::begin(contents), std::end(contents),
-                         [addr](auto& query) { return query.GetCacheAddr() == addr; });
+        const auto found = std::find_if(std::begin(contents), std::end(contents),
+                                        [addr](auto& query) { return query.GetCpuAddr() == addr; });
         return found != std::end(contents) ? &*found : nullptr;
+    }
+
+    void AsyncFlushQuery(VAddr addr) {
+        if (!uncommitted_flushes) {
+            uncommitted_flushes = std::make_shared<std::unordered_set<VAddr>>();
+        }
+        uncommitted_flushes->insert(addr);
     }
 
     static constexpr std::uintptr_t PAGE_SIZE = 4096;
@@ -234,6 +278,9 @@ private:
     std::unordered_map<u64, std::vector<CachedQuery>> cached_queries;
 
     std::array<CounterStream, VideoCore::NumQueryTypes> streams;
+
+    std::shared_ptr<std::unordered_set<VAddr>> uncommitted_flushes{};
+    std::list<std::shared_ptr<std::unordered_set<VAddr>>> committed_flushes;
 };
 
 template <class QueryCache, class HostCounter>
@@ -323,12 +370,8 @@ public:
         timestamp = timestamp_;
     }
 
-    VAddr CpuAddr() const noexcept {
+    VAddr GetCpuAddr() const noexcept {
         return cpu_addr;
-    }
-
-    CacheAddr GetCacheAddr() const noexcept {
-        return ToCacheAddr(host_ptr);
     }
 
     u64 SizeInBytes() const noexcept {

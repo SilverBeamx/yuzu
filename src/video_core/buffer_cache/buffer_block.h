@@ -15,60 +15,51 @@ namespace VideoCommon {
 
 class BufferBlock {
 public:
-    bool Overlaps(const CacheAddr start, const CacheAddr end) const {
-        return (cache_addr < end) && (cache_addr_end > start);
+    bool Overlaps(VAddr start, VAddr end) const {
+        return (cpu_addr < end) && (cpu_addr_end > start);
     }
 
-    bool IsInside(const CacheAddr other_start, const CacheAddr other_end) const {
-        return cache_addr <= other_start && other_end <= cache_addr_end;
+    bool IsInside(VAddr other_start, VAddr other_end) const {
+        return cpu_addr <= other_start && other_end <= cpu_addr_end;
     }
 
-    u8* GetWritableHostPtr() const {
-        return FromCacheAddr(cache_addr);
+    std::size_t Offset(VAddr in_addr) const {
+        return static_cast<std::size_t>(in_addr - cpu_addr);
     }
 
-    u8* GetWritableHostPtr(std::size_t offset) const {
-        return FromCacheAddr(cache_addr + offset);
+    VAddr CpuAddr() const {
+        return cpu_addr;
     }
 
-    std::size_t GetOffset(const CacheAddr in_addr) {
-        return static_cast<std::size_t>(in_addr - cache_addr);
+    VAddr CpuAddrEnd() const {
+        return cpu_addr_end;
     }
 
-    CacheAddr GetCacheAddr() const {
-        return cache_addr;
+    void SetCpuAddr(VAddr new_addr) {
+        cpu_addr = new_addr;
+        cpu_addr_end = new_addr + size;
     }
 
-    CacheAddr GetCacheAddrEnd() const {
-        return cache_addr_end;
-    }
-
-    void SetCacheAddr(const CacheAddr new_addr) {
-        cache_addr = new_addr;
-        cache_addr_end = new_addr + size;
-    }
-
-    std::size_t GetSize() const {
+    std::size_t Size() const {
         return size;
+    }
+
+    u64 Epoch() const {
+        return epoch;
     }
 
     void SetEpoch(u64 new_epoch) {
         epoch = new_epoch;
     }
 
-    u64 GetEpoch() {
-        return epoch;
-    }
-
 protected:
-    explicit BufferBlock(CacheAddr cache_addr, const std::size_t size) : size{size} {
-        SetCacheAddr(cache_addr);
+    explicit BufferBlock(VAddr cpu_addr_, std::size_t size_) : size{size_} {
+        SetCpuAddr(cpu_addr_);
     }
-    ~BufferBlock() = default;
 
 private:
-    CacheAddr cache_addr{};
-    CacheAddr cache_addr_end{};
+    VAddr cpu_addr{};
+    VAddr cpu_addr_end{};
     std::size_t size{};
     u64 epoch{};
 };

@@ -4,12 +4,11 @@
 
 #pragma once
 
-#include <type_traits>
 #include <variant>
 #include <boost/container/static_vector.hpp>
 
 #include "common/common_types.h"
-#include "video_core/renderer_vulkan/declarations.h"
+#include "video_core/renderer_vulkan/wrapper.h"
 
 namespace Vulkan {
 
@@ -18,20 +17,19 @@ class VKScheduler;
 
 class DescriptorUpdateEntry {
 public:
-    explicit DescriptorUpdateEntry() : image{} {}
+    explicit DescriptorUpdateEntry() {}
 
-    DescriptorUpdateEntry(vk::DescriptorImageInfo image) : image{image} {}
+    DescriptorUpdateEntry(VkDescriptorImageInfo image) : image{image} {}
 
-    DescriptorUpdateEntry(vk::Buffer buffer, vk::DeviceSize offset, vk::DeviceSize size)
-        : buffer{buffer, offset, size} {}
+    DescriptorUpdateEntry(VkDescriptorBufferInfo buffer) : buffer{buffer} {}
 
-    DescriptorUpdateEntry(vk::BufferView texel_buffer) : texel_buffer{texel_buffer} {}
+    DescriptorUpdateEntry(VkBufferView texel_buffer) : texel_buffer{texel_buffer} {}
 
 private:
     union {
-        vk::DescriptorImageInfo image;
-        vk::DescriptorBufferInfo buffer;
-        vk::BufferView texel_buffer;
+        VkDescriptorImageInfo image;
+        VkDescriptorBufferInfo buffer;
+        VkBufferView texel_buffer;
     };
 };
 
@@ -44,37 +42,30 @@ public:
 
     void Acquire();
 
-    void Send(vk::DescriptorUpdateTemplate update_template, vk::DescriptorSet set);
+    void Send(VkDescriptorUpdateTemplateKHR update_template, VkDescriptorSet set);
 
-    void AddSampledImage(vk::Sampler sampler, vk::ImageView image_view) {
-        entries.emplace_back(vk::DescriptorImageInfo{sampler, image_view, {}});
+    void AddSampledImage(VkSampler sampler, VkImageView image_view) {
+        entries.emplace_back(VkDescriptorImageInfo{sampler, image_view, {}});
     }
 
-    void AddImage(vk::ImageView image_view) {
-        entries.emplace_back(vk::DescriptorImageInfo{{}, image_view, {}});
+    void AddImage(VkImageView image_view) {
+        entries.emplace_back(VkDescriptorImageInfo{{}, image_view, {}});
     }
 
-    void AddBuffer(const vk::Buffer* buffer, u64 offset, std::size_t size) {
-        entries.push_back(Buffer{buffer, offset, size});
+    void AddBuffer(VkBuffer buffer, u64 offset, std::size_t size) {
+        entries.emplace_back(VkDescriptorBufferInfo{buffer, offset, size});
     }
 
-    void AddTexelBuffer(vk::BufferView texel_buffer) {
+    void AddTexelBuffer(VkBufferView texel_buffer) {
         entries.emplace_back(texel_buffer);
     }
 
-    vk::ImageLayout* GetLastImageLayout() {
-        return &std::get<vk::DescriptorImageInfo>(entries.back()).imageLayout;
+    VkImageLayout* GetLastImageLayout() {
+        return &std::get<VkDescriptorImageInfo>(entries.back()).imageLayout;
     }
 
 private:
-    struct Buffer {
-        const vk::Buffer* buffer{};
-        u64 offset{};
-        std::size_t size{};
-    };
-    using Variant = std::variant<vk::DescriptorImageInfo, Buffer, vk::BufferView>;
-    // Old gcc versions don't consider this trivially copyable.
-    // static_assert(std::is_trivially_copyable_v<Variant>);
+    using Variant = std::variant<VkDescriptorImageInfo, VkDescriptorBufferInfo, VkBufferView>;
 
     const VKDevice& device;
     VKScheduler& scheduler;

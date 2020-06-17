@@ -98,6 +98,9 @@ EmuWindow_SDL2_GL::EmuWindow_SDL2_GL(Core::System& system, bool fullscreen)
     SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 0);
     SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 1);
+    if (Settings::values.renderer_debug) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_DEBUG_FLAG);
+    }
     SDL_GL_SetSwapInterval(0);
 
     std::string window_title = fmt::format("yuzu {} | {}-{}", Common::g_build_fullname,
@@ -154,12 +157,6 @@ EmuWindow_SDL2_GL::EmuWindow_SDL2_GL(Core::System& system, bool fullscreen)
 EmuWindow_SDL2_GL::~EmuWindow_SDL2_GL() {
     core_context.reset();
     SDL_GL_DeleteContext(window_context);
-}
-
-void EmuWindow_SDL2_GL::RetrieveVulkanHandlers(void* get_instance_proc_addr, void* instance,
-                                               void* surface) const {
-    // Should not have been called from OpenGL
-    UNREACHABLE();
 }
 
 std::unique_ptr<Core::Frontend::GraphicsContext> EmuWindow_SDL2_GL::CreateSharedContext() const {

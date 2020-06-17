@@ -5,15 +5,13 @@
 #pragma once
 
 #include <climits>
-#include <unordered_map>
-#include <utility>
 #include <vector>
 
 #include "common/common_types.h"
 
-#include "video_core/renderer_vulkan/declarations.h"
 #include "video_core/renderer_vulkan/vk_memory_manager.h"
 #include "video_core/renderer_vulkan/vk_resource_manager.h"
+#include "video_core/renderer_vulkan/wrapper.h"
 
 namespace Vulkan {
 
@@ -22,7 +20,7 @@ class VKFenceWatch;
 class VKScheduler;
 
 struct VKBuffer final {
-    UniqueBuffer handle;
+    vk::Buffer handle;
     VKMemoryCommit commit;
 };
 
@@ -71,7 +69,6 @@ private:
     const VKDevice& device;
     VKMemoryManager& memory_manager;
     VKScheduler& scheduler;
-    const bool is_device_integrated;
 
     StagingBuffersCache host_staging_buffers;
     StagingBuffersCache device_staging_buffers;

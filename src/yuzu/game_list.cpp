@@ -315,7 +315,7 @@ GameList::GameList(FileSys::VirtualFilesystem vfs, FileSys::ManualContentProvide
         item_model->setHeaderData(COLUMN_FILE_TYPE - 1, Qt::Horizontal, tr("File type"));
         item_model->setHeaderData(COLUMN_SIZE - 1, Qt::Horizontal, tr("Size"));
     }
-    item_model->setSortRole(GameListItemPath::TitleRole);
+    item_model->setSortRole(GameListItemPath::SortRole);
 
     connect(main_window, &GMainWindow::UpdateThemedIcons, this, &GameList::onUpdateThemedIcons);
     connect(tree_view, &QTreeView::activated, this, &GameList::ValidateEntry);
@@ -441,6 +441,8 @@ void GameList::DonePopulating(QStringList watch_list) {
     if (children_total > 0) {
         search_field->setFocus();
     }
+    item_model->sort(tree_view->header()->sortIndicatorSection(),
+                     tree_view->header()->sortIndicatorOrder());
 }
 
 void GameList::PopupContextMenu(const QPoint& menu_location) {
@@ -486,11 +488,11 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, std::string pat
     auto it = FindMatchingCompatibilityEntry(compatibility_list, program_id);
     navigate_to_gamedb_entry->setVisible(it != compatibility_list.end() && program_id != 0);
 
-    connect(open_save_location, &QAction::triggered, [this, program_id]() {
-        emit OpenFolderRequested(program_id, GameListOpenTarget::SaveData);
+    connect(open_save_location, &QAction::triggered, [this, program_id, path]() {
+        emit OpenFolderRequested(GameListOpenTarget::SaveData, path);
     });
-    connect(open_lfs_location, &QAction::triggered, [this, program_id]() {
-        emit OpenFolderRequested(program_id, GameListOpenTarget::ModData);
+    connect(open_lfs_location, &QAction::triggered, [this, program_id, path]() {
+        emit OpenFolderRequested(GameListOpenTarget::ModData, path);
     });
     connect(open_transferable_shader_cache, &QAction::triggered,
             [this, program_id]() { emit OpenTransferableShaderCacheRequested(program_id); });
@@ -666,8 +668,6 @@ void GameList::LoadInterfaceLayout() {
         // so make it as large as possible as default.
         header->resizeSection(COLUMN_NAME, header->width());
     }
-
-    item_model->sort(header->sortIndicatorSection(), header->sortIndicatorOrder());
 }
 
 const QStringList GameList::supported_file_extensions = {

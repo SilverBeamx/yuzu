@@ -183,7 +183,7 @@ private slots:
     void OnMenuReportCompatibility();
     /// Called whenever a user selects a game in the game list widget.
     void OnGameListLoadFile(QString game_path);
-    void OnGameListOpenFolder(u64 program_id, GameListOpenTarget target);
+    void OnGameListOpenFolder(GameListOpenTarget target, const std::string& game_path);
     void OnTransferableShaderCacheOpenFile(u64 program_id);
     void OnGameListDumpRomFS(u64 program_id, const std::string& game_path);
     void OnGameListCopyTID(u64 program_id);
@@ -196,8 +196,6 @@ private slots:
     void OnMenuLoadFile();
     void OnMenuLoadFolder();
     void OnMenuInstallToNAND();
-    /// Called whenever a user select the "File->Select -- Directory" where -- is NAND or SD Card
-    void OnMenuSelectEmulatedDirectory(EmulatedDirectoryTarget target);
     void OnMenuRecentFile();
     void OnConfigure();
     void OnLoadAmiibo();
@@ -210,6 +208,7 @@ private slots:
     void ShowFullscreen();
     void HideFullscreen();
     void ToggleWindowMode();
+    void ResetWindowSize();
     void OnCaptureScreenshot();
     void OnCoreError(Core::System::ResultStatus, std::string);
     void OnReinitializeKeys(ReinitializeKeyBehavior behavior);
@@ -218,6 +217,8 @@ private:
     std::optional<u64> SelectRomFSDumpTarget(const FileSys::ContentProvider&, u64 program_id);
     void UpdateWindowTitle(const QString& title_name = {});
     void UpdateStatusBar();
+    void HideMouseCursor();
+    void ShowMouseCursor();
 
     Ui::MainWindow ui;
 
@@ -246,6 +247,7 @@ private:
     QString game_path;
 
     bool auto_paused = false;
+    QTimer mouse_hide_timer;
 
     // FS
     std::shared_ptr<FileSys::VfsFilesystem> vfs;
@@ -267,4 +269,6 @@ protected:
     void dropEvent(QDropEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dragMoveEvent(QDragMoveEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
 };

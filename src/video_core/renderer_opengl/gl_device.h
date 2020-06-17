@@ -24,6 +24,10 @@ public:
     explicit Device();
     explicit Device(std::nullptr_t);
 
+    u32 GetMaxUniformBuffers(Tegra::Engines::ShaderType shader_type) const noexcept {
+        return max_uniform_buffers[static_cast<std::size_t>(shader_type)];
+    }
+
     const BaseBindings& GetBaseBindings(std::size_t stage_index) const noexcept {
         return base_bindings[stage_index];
     }
@@ -80,19 +84,24 @@ public:
         return has_precise_bug;
     }
 
-    bool HasBrokenCompute() const {
-        return has_broken_compute;
-    }
-
     bool HasFastBufferSubData() const {
         return has_fast_buffer_sub_data;
+    }
+
+    bool HasNvViewportArray2() const {
+        return has_nv_viewport_array2;
+    }
+
+    bool UseAssemblyShaders() const {
+        return use_assembly_shaders;
     }
 
 private:
     static bool TestVariableAoffi();
     static bool TestPreciseBug();
 
-    std::array<BaseBindings, Tegra::Engines::MaxShaderTypes> base_bindings;
+    std::array<u32, Tegra::Engines::MaxShaderTypes> max_uniform_buffers{};
+    std::array<BaseBindings, Tegra::Engines::MaxShaderTypes> base_bindings{};
     std::size_t uniform_buffer_alignment{};
     std::size_t shader_storage_alignment{};
     u32 max_vertex_attributes{};
@@ -105,8 +114,9 @@ private:
     bool has_variable_aoffi{};
     bool has_component_indexing_bug{};
     bool has_precise_bug{};
-    bool has_broken_compute{};
     bool has_fast_buffer_sub_data{};
+    bool has_nv_viewport_array2{};
+    bool use_assembly_shaders{};
 };
 
 } // namespace OpenGL

@@ -13,7 +13,6 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
-#include "video_core/renderer_vulkan/declarations.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
@@ -23,82 +22,35 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_renderpass_cache.h"
-#include "video_core/renderer_vulkan/vk_resource_manager.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
+#include "video_core/renderer_vulkan/wrapper.h"
 #include "video_core/shader/compiler_settings.h"
+#include "video_core/shader/memory_util.h"
+#include "video_core/shader_cache.h"
 
 namespace Vulkan {
 
 MICROPROFILE_DECLARE(Vulkan_PipelineCache);
 
 using Tegra::Engines::ShaderType;
+using VideoCommon::Shader::GetShaderAddress;
+using VideoCommon::Shader::GetShaderCode;
+using VideoCommon::Shader::KERNEL_MAIN_OFFSET;
+using VideoCommon::Shader::ProgramCode;
+using VideoCommon::Shader::STAGE_MAIN_OFFSET;
 
 namespace {
 
-// C++20's using enum
-constexpr auto eUniformBuffer = vk::DescriptorType::eUniformBuffer;
-constexpr auto eStorageBuffer = vk::DescriptorType::eStorageBuffer;
-constexpr auto eUniformTexelBuffer = vk::DescriptorType::eUniformTexelBuffer;
-constexpr auto eCombinedImageSampler = vk::DescriptorType::eCombinedImageSampler;
-constexpr auto eStorageImage = vk::DescriptorType::eStorageImage;
+constexpr VkDescriptorType UNIFORM_BUFFER = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+constexpr VkDescriptorType STORAGE_BUFFER = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+constexpr VkDescriptorType UNIFORM_TEXEL_BUFFER = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+constexpr VkDescriptorType COMBINED_IMAGE_SAMPLER = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+constexpr VkDescriptorType STORAGE_TEXEL_BUFFER = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+constexpr VkDescriptorType STORAGE_IMAGE = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 
 constexpr VideoCommon::Shader::CompilerSettings compiler_settings{
     VideoCommon::Shader::CompileDepth::FullDecompile};
-
-/// Gets the address for the specified shader stage program
-GPUVAddr GetShaderAddress(Core::System& system, Maxwell::ShaderProgram program) {
-    const auto& gpu{system.GPU().Maxwell3D()};
-    const auto& shader_config{gpu.regs.shader_config[static_cast<std::size_t>(program)]};
-    return gpu.regs.code_address.CodeAddress() + shader_config.offset;
-}
-
-/// Gets if the current instruction offset is a scheduler instruction
-constexpr bool IsSchedInstruction(std::size_t offset, std::size_t main_offset) {
-    // Sched instructions appear once every 4 instructions.
-    constexpr std::size_t SchedPeriod = 4;
-    const std::size_t absolute_offset = offset - main_offset;
-    return (absolute_offset % SchedPeriod) == 0;
-}
-
-/// Calculates the size of a program stream
-std::size_t CalculateProgramSize(const ProgramCode& program, bool is_compute) {
-    const std::size_t start_offset = is_compute ? 0 : 10;
-    // This is the encoded version of BRA that jumps to itself. All Nvidia
-    // shaders end with one.
-    constexpr u64 self_jumping_branch = 0xE2400FFFFF07000FULL;
-    constexpr u64 mask = 0xFFFFFFFFFF7FFFFFULL;
-    std::size_t offset = start_offset;
-    while (offset < program.size()) {
-        const u64 instruction = program[offset];
-        if (!IsSchedInstruction(offset, start_offset)) {
-            if ((instruction & mask) == self_jumping_branch) {
-                // End on Maxwell's "nop" instruction
-                break;
-            }
-            if (instruction == 0) {
-                break;
-            }
-        }
-        ++offset;
-    }
-    // The last instruction is included in the program size
-    return std::min(offset + 1, program.size());
-}
-
-/// Gets the shader program code from memory for the specified address
-ProgramCode GetShaderCode(Tegra::MemoryManager& memory_manager, const GPUVAddr gpu_addr,
-                          const u8* host_ptr, bool is_compute) {
-    ProgramCode program_code(VideoCommon::Shader::MAX_PROGRAM_LENGTH);
-    ASSERT_OR_EXECUTE(host_ptr != nullptr, {
-        std::fill(program_code.begin(), program_code.end(), 0);
-        return program_code;
-    });
-    memory_manager.ReadBlockUnsafe(gpu_addr, program_code.data(),
-                                   program_code.size() * sizeof(u64));
-    program_code.resize(CalculateProgramSize(program_code, is_compute));
-    return program_code;
-}
 
 constexpr std::size_t GetStageFromProgram(std::size_t program) {
     return program == 0 ? 0 : program - 1;
@@ -126,50 +78,73 @@ ShaderType GetShaderType(Maxwell::ShaderProgram program) {
     }
 }
 
-template <vk::DescriptorType descriptor_type, class Container>
-void AddBindings(std::vector<vk::DescriptorSetLayoutBinding>& bindings, u32& binding,
-                 vk::ShaderStageFlags stage_flags, const Container& container) {
+template <VkDescriptorType descriptor_type, class Container>
+void AddBindings(std::vector<VkDescriptorSetLayoutBinding>& bindings, u32& binding,
+                 VkShaderStageFlags stage_flags, const Container& container) {
     const u32 num_entries = static_cast<u32>(std::size(container));
     for (std::size_t i = 0; i < num_entries; ++i) {
         u32 count = 1;
-        if constexpr (descriptor_type == eCombinedImageSampler) {
+        if constexpr (descriptor_type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
             // Combined image samplers can be arrayed.
-            count = container[i].Size();
+            count = container[i].size;
         }
-        bindings.emplace_back(binding++, descriptor_type, count, stage_flags, nullptr);
+        VkDescriptorSetLayoutBinding& entry = bindings.emplace_back();
+        entry.binding = binding++;
+        entry.descriptorType = descriptor_type;
+        entry.descriptorCount = count;
+        entry.stageFlags = stage_flags;
+        entry.pImmutableSamplers = nullptr;
     }
 }
 
 u32 FillDescriptorLayout(const ShaderEntries& entries,
-                         std::vector<vk::DescriptorSetLayoutBinding>& bindings,
+                         std::vector<VkDescriptorSetLayoutBinding>& bindings,
                          Maxwell::ShaderProgram program_type, u32 base_binding) {
     const ShaderType stage = GetStageFromProgram(program_type);
-    const vk::ShaderStageFlags flags = MaxwellToVK::ShaderStage(stage);
+    const VkShaderStageFlags flags = MaxwellToVK::ShaderStage(stage);
 
     u32 binding = base_binding;
-    AddBindings<eUniformBuffer>(bindings, binding, flags, entries.const_buffers);
-    AddBindings<eStorageBuffer>(bindings, binding, flags, entries.global_buffers);
-    AddBindings<eUniformTexelBuffer>(bindings, binding, flags, entries.texel_buffers);
-    AddBindings<eCombinedImageSampler>(bindings, binding, flags, entries.samplers);
-    AddBindings<eStorageImage>(bindings, binding, flags, entries.images);
+    AddBindings<UNIFORM_BUFFER>(bindings, binding, flags, entries.const_buffers);
+    AddBindings<STORAGE_BUFFER>(bindings, binding, flags, entries.global_buffers);
+    AddBindings<UNIFORM_TEXEL_BUFFER>(bindings, binding, flags, entries.uniform_texels);
+    AddBindings<COMBINED_IMAGE_SAMPLER>(bindings, binding, flags, entries.samplers);
+    AddBindings<STORAGE_TEXEL_BUFFER>(bindings, binding, flags, entries.storage_texels);
+    AddBindings<STORAGE_IMAGE>(bindings, binding, flags, entries.images);
     return binding;
 }
 
 } // Anonymous namespace
 
-CachedShader::CachedShader(Core::System& system, Tegra::Engines::ShaderType stage,
-                           GPUVAddr gpu_addr, VAddr cpu_addr, u8* host_ptr,
-                           ProgramCode program_code, u32 main_offset)
-    : RasterizerCacheObject{host_ptr}, gpu_addr{gpu_addr}, cpu_addr{cpu_addr},
-      program_code{std::move(program_code)}, registry{stage, GetEngine(system, stage)},
-      shader_ir{this->program_code, main_offset, compiler_settings, registry},
+std::size_t GraphicsPipelineCacheKey::Hash() const noexcept {
+    const u64 hash = Common::CityHash64(reinterpret_cast<const char*>(this), sizeof *this);
+    return static_cast<std::size_t>(hash);
+}
+
+bool GraphicsPipelineCacheKey::operator==(const GraphicsPipelineCacheKey& rhs) const noexcept {
+    return std::memcmp(&rhs, this, sizeof *this) == 0;
+}
+
+std::size_t ComputePipelineCacheKey::Hash() const noexcept {
+    const u64 hash = Common::CityHash64(reinterpret_cast<const char*>(this), sizeof *this);
+    return static_cast<std::size_t>(hash);
+}
+
+bool ComputePipelineCacheKey::operator==(const ComputePipelineCacheKey& rhs) const noexcept {
+    return std::memcmp(&rhs, this, sizeof *this) == 0;
+}
+
+Shader::Shader(Core::System& system, Tegra::Engines::ShaderType stage, GPUVAddr gpu_addr,
+               VideoCommon::Shader::ProgramCode program_code, u32 main_offset)
+    : gpu_addr{gpu_addr}, program_code{std::move(program_code)},
+      registry{stage, GetEngine(system, stage)}, shader_ir{this->program_code, main_offset,
+                                                           compiler_settings, registry},
       entries{GenerateShaderEntries(shader_ir)} {}
 
-CachedShader::~CachedShader() = default;
+Shader::~Shader() = default;
 
-Tegra::Engines::ConstBufferEngineInterface& CachedShader::GetEngine(
-    Core::System& system, Tegra::Engines::ShaderType stage) {
-    if (stage == Tegra::Engines::ShaderType::Compute) {
+Tegra::Engines::ConstBufferEngineInterface& Shader::GetEngine(Core::System& system,
+                                                              Tegra::Engines::ShaderType stage) {
+    if (stage == ShaderType::Compute) {
         return system.GPU().KeplerCompute();
     } else {
         return system.GPU().Maxwell3D();
@@ -181,16 +156,16 @@ VKPipelineCache::VKPipelineCache(Core::System& system, RasterizerVulkan& rasteri
                                  VKDescriptorPool& descriptor_pool,
                                  VKUpdateDescriptorQueue& update_descriptor_queue,
                                  VKRenderPassCache& renderpass_cache)
-    : RasterizerCache{rasterizer}, system{system}, device{device}, scheduler{scheduler},
-      descriptor_pool{descriptor_pool}, update_descriptor_queue{update_descriptor_queue},
-      renderpass_cache{renderpass_cache} {}
+    : VideoCommon::ShaderCache<Shader>{rasterizer}, system{system}, device{device},
+      scheduler{scheduler}, descriptor_pool{descriptor_pool},
+      update_descriptor_queue{update_descriptor_queue}, renderpass_cache{renderpass_cache} {}
 
 VKPipelineCache::~VKPipelineCache() = default;
 
-std::array<Shader, Maxwell::MaxShaderProgram> VKPipelineCache::GetShaders() {
+std::array<Shader*, Maxwell::MaxShaderProgram> VKPipelineCache::GetShaders() {
     const auto& gpu = system.GPU().Maxwell3D();
 
-    std::array<Shader, Maxwell::MaxShaderProgram> shaders;
+    std::array<Shader*, Maxwell::MaxShaderProgram> shaders{};
     for (std::size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
         const auto program{static_cast<Maxwell::ShaderProgram>(index)};
 
@@ -201,22 +176,30 @@ std::array<Shader, Maxwell::MaxShaderProgram> VKPipelineCache::GetShaders() {
 
         auto& memory_manager{system.GPU().MemoryManager()};
         const GPUVAddr program_addr{GetShaderAddress(system, program)};
-        const auto host_ptr{memory_manager.GetPointer(program_addr)};
-        auto shader = TryGet(host_ptr);
-        if (!shader) {
+        const std::optional cpu_addr = memory_manager.GpuToCpuAddress(program_addr);
+        ASSERT(cpu_addr);
+
+        Shader* result = cpu_addr ? TryGet(*cpu_addr) : null_shader.get();
+        if (!result) {
+            const auto host_ptr{memory_manager.GetPointer(program_addr)};
+
             // No shader found - create a new one
-            constexpr u32 stage_offset = 10;
-            const auto stage = static_cast<Tegra::Engines::ShaderType>(index == 0 ? 0 : index - 1);
-            auto code = GetShaderCode(memory_manager, program_addr, host_ptr, false);
+            constexpr u32 stage_offset = STAGE_MAIN_OFFSET;
+            const auto stage = static_cast<ShaderType>(index == 0 ? 0 : index - 1);
+            ProgramCode code = GetShaderCode(memory_manager, program_addr, host_ptr, false);
+            const std::size_t size_in_bytes = code.size() * sizeof(u64);
 
-            const std::optional cpu_addr = memory_manager.GpuToCpuAddress(program_addr);
-            ASSERT(cpu_addr);
+            auto shader = std::make_unique<Shader>(system, stage, program_addr, std::move(code),
+                                                   stage_offset);
+            result = shader.get();
 
-            shader = std::make_shared<CachedShader>(system, stage, program_addr, *cpu_addr,
-                                                    host_ptr, std::move(code), stage_offset);
-            Register(shader);
+            if (cpu_addr) {
+                Register(std::move(shader), *cpu_addr, size_in_bytes);
+            } else {
+                null_shader = std::move(shader);
+            }
         }
-        shaders[index] = std::move(shader);
+        shaders[index] = result;
     }
     return last_shaders = shaders;
 }
@@ -253,20 +236,27 @@ VKComputePipeline& VKPipelineCache::GetComputePipeline(const ComputePipelineCach
 
     auto& memory_manager = system.GPU().MemoryManager();
     const auto program_addr = key.shader;
-    const auto host_ptr = memory_manager.GetPointer(program_addr);
 
-    auto shader = TryGet(host_ptr);
+    const auto cpu_addr = memory_manager.GpuToCpuAddress(program_addr);
+    ASSERT(cpu_addr);
+
+    Shader* shader = cpu_addr ? TryGet(*cpu_addr) : null_kernel.get();
     if (!shader) {
         // No shader found - create a new one
-        const auto cpu_addr = memory_manager.GpuToCpuAddress(program_addr);
-        ASSERT(cpu_addr);
+        const auto host_ptr = memory_manager.GetPointer(program_addr);
 
-        auto code = GetShaderCode(memory_manager, program_addr, host_ptr, true);
-        constexpr u32 kernel_main_offset = 0;
-        shader = std::make_shared<CachedShader>(system, Tegra::Engines::ShaderType::Compute,
-                                                program_addr, *cpu_addr, host_ptr, std::move(code),
-                                                kernel_main_offset);
-        Register(shader);
+        ProgramCode code = GetShaderCode(memory_manager, program_addr, host_ptr, true);
+        const std::size_t size_in_bytes = code.size() * sizeof(u64);
+
+        auto shader_info = std::make_unique<Shader>(system, ShaderType::Compute, program_addr,
+                                                    std::move(code), KERNEL_MAIN_OFFSET);
+        shader = shader_info.get();
+
+        if (cpu_addr) {
+            Register(std::move(shader_info), *cpu_addr, size_in_bytes);
+        } else {
+            null_kernel = std::move(shader_info);
+        }
     }
 
     Specialization specialization;
@@ -281,7 +271,7 @@ VKComputePipeline& VKPipelineCache::GetComputePipeline(const ComputePipelineCach
     return *entry;
 }
 
-void VKPipelineCache::Unregister(const Shader& shader) {
+void VKPipelineCache::OnShaderRemoval(Shader* shader) {
     bool finished = false;
     const auto Finish = [&] {
         // TODO(Rodrigo): Instead of finishing here, wait for the fences that use this pipeline and
@@ -313,28 +303,30 @@ void VKPipelineCache::Unregister(const Shader& shader) {
         Finish();
         it = compute_cache.erase(it);
     }
-
-    RasterizerCache::Unregister(shader);
 }
 
-std::pair<SPIRVProgram, std::vector<vk::DescriptorSetLayoutBinding>>
+std::pair<SPIRVProgram, std::vector<VkDescriptorSetLayoutBinding>>
 VKPipelineCache::DecompileShaders(const GraphicsPipelineCacheKey& key) {
     const auto& fixed_state = key.fixed_state;
     auto& memory_manager = system.GPU().MemoryManager();
     const auto& gpu = system.GPU().Maxwell3D();
 
     Specialization specialization;
-    if (fixed_state.input_assembly.topology == Maxwell::PrimitiveTopology::Points) {
-        ASSERT(fixed_state.input_assembly.point_size != 0.0f);
-        specialization.point_size = fixed_state.input_assembly.point_size;
+    if (fixed_state.rasterizer.Topology() == Maxwell::PrimitiveTopology::Points) {
+        float point_size;
+        std::memcpy(&point_size, &fixed_state.rasterizer.point_size, sizeof(float));
+        specialization.point_size = point_size;
+        ASSERT(point_size != 0.0f);
     }
     for (std::size_t i = 0; i < Maxwell::NumVertexAttributes; ++i) {
-        specialization.attribute_types[i] = fixed_state.vertex_input.attributes[i].type;
+        const auto& attribute = fixed_state.vertex_input.attributes[i];
+        specialization.enabled_attributes[i] = attribute.enabled.Value() != 0;
+        specialization.attribute_types[i] = attribute.Type();
     }
     specialization.ndc_minus_one_to_one = fixed_state.rasterizer.ndc_minus_one_to_one;
 
     SPIRVProgram program;
-    std::vector<vk::DescriptorSetLayoutBinding> bindings;
+    std::vector<VkDescriptorSetLayoutBinding> bindings;
 
     for (std::size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
         const auto program_enum = static_cast<Maxwell::ShaderProgram>(index);
@@ -345,12 +337,11 @@ VKPipelineCache::DecompileShaders(const GraphicsPipelineCacheKey& key) {
         }
 
         const GPUVAddr gpu_addr = GetShaderAddress(system, program_enum);
-        const auto host_ptr = memory_manager.GetPointer(gpu_addr);
-        const auto shader = TryGet(host_ptr);
-        ASSERT(shader);
+        const std::optional<VAddr> cpu_addr = memory_manager.GpuToCpuAddress(gpu_addr);
+        Shader* const shader = cpu_addr ? TryGet(*cpu_addr) : null_shader.get();
 
         const std::size_t stage = index == 0 ? 0 : index - 1; // Stage indices are 0 - 5
-        const auto program_type = GetShaderType(program_enum);
+        const ShaderType program_type = GetShaderType(program_enum);
         const auto& entries = shader->GetEntries();
         program[stage] = {
             Decompile(device, shader->GetIR(), program_type, shader->GetRegistry(), specialization),
@@ -369,32 +360,50 @@ VKPipelineCache::DecompileShaders(const GraphicsPipelineCacheKey& key) {
     return {std::move(program), std::move(bindings)};
 }
 
-template <vk::DescriptorType descriptor_type, class Container>
-void AddEntry(std::vector<vk::DescriptorUpdateTemplateEntry>& template_entries, u32& binding,
+template <VkDescriptorType descriptor_type, class Container>
+void AddEntry(std::vector<VkDescriptorUpdateTemplateEntry>& template_entries, u32& binding,
               u32& offset, const Container& container) {
     static constexpr u32 entry_size = static_cast<u32>(sizeof(DescriptorUpdateEntry));
     const u32 count = static_cast<u32>(std::size(container));
 
-    if constexpr (descriptor_type == eCombinedImageSampler) {
+    if constexpr (descriptor_type == COMBINED_IMAGE_SAMPLER) {
         for (u32 i = 0; i < count; ++i) {
-            const u32 num_samplers = container[i].Size();
-            template_entries.emplace_back(binding, 0, num_samplers, descriptor_type, offset,
-                                          entry_size);
+            const u32 num_samplers = container[i].size;
+            VkDescriptorUpdateTemplateEntry& entry = template_entries.emplace_back();
+            entry.dstBinding = binding;
+            entry.dstArrayElement = 0;
+            entry.descriptorCount = num_samplers;
+            entry.descriptorType = descriptor_type;
+            entry.offset = offset;
+            entry.stride = entry_size;
+
             ++binding;
             offset += num_samplers * entry_size;
         }
         return;
     }
 
-    if constexpr (descriptor_type == eUniformTexelBuffer) {
-        // Nvidia has a bug where updating multiple uniform texels at once causes the driver to
-        // crash.
+    if constexpr (descriptor_type == UNIFORM_TEXEL_BUFFER ||
+                  descriptor_type == STORAGE_TEXEL_BUFFER) {
+        // Nvidia has a bug where updating multiple texels at once causes the driver to crash.
+        // Note: Fixed in driver Windows 443.24, Linux 440.66.15
         for (u32 i = 0; i < count; ++i) {
-            template_entries.emplace_back(binding + i, 0, 1, descriptor_type,
-                                          offset + i * entry_size, entry_size);
+            VkDescriptorUpdateTemplateEntry& entry = template_entries.emplace_back();
+            entry.dstBinding = binding + i;
+            entry.dstArrayElement = 0;
+            entry.descriptorCount = 1;
+            entry.descriptorType = descriptor_type;
+            entry.offset = static_cast<std::size_t>(offset + i * entry_size);
+            entry.stride = entry_size;
         }
     } else if (count > 0) {
-        template_entries.emplace_back(binding, 0, count, descriptor_type, offset, entry_size);
+        VkDescriptorUpdateTemplateEntry& entry = template_entries.emplace_back();
+        entry.dstBinding = binding;
+        entry.dstArrayElement = 0;
+        entry.descriptorCount = count;
+        entry.descriptorType = descriptor_type;
+        entry.offset = offset;
+        entry.stride = entry_size;
     }
     offset += count * entry_size;
     binding += count;
@@ -402,12 +411,13 @@ void AddEntry(std::vector<vk::DescriptorUpdateTemplateEntry>& template_entries, 
 
 void FillDescriptorUpdateTemplateEntries(
     const ShaderEntries& entries, u32& binding, u32& offset,
-    std::vector<vk::DescriptorUpdateTemplateEntry>& template_entries) {
-    AddEntry<eUniformBuffer>(template_entries, offset, binding, entries.const_buffers);
-    AddEntry<eStorageBuffer>(template_entries, offset, binding, entries.global_buffers);
-    AddEntry<eUniformTexelBuffer>(template_entries, offset, binding, entries.texel_buffers);
-    AddEntry<eCombinedImageSampler>(template_entries, offset, binding, entries.samplers);
-    AddEntry<eStorageImage>(template_entries, offset, binding, entries.images);
+    std::vector<VkDescriptorUpdateTemplateEntryKHR>& template_entries) {
+    AddEntry<UNIFORM_BUFFER>(template_entries, offset, binding, entries.const_buffers);
+    AddEntry<STORAGE_BUFFER>(template_entries, offset, binding, entries.global_buffers);
+    AddEntry<UNIFORM_TEXEL_BUFFER>(template_entries, offset, binding, entries.uniform_texels);
+    AddEntry<COMBINED_IMAGE_SAMPLER>(template_entries, offset, binding, entries.samplers);
+    AddEntry<STORAGE_TEXEL_BUFFER>(template_entries, offset, binding, entries.storage_texels);
+    AddEntry<STORAGE_IMAGE>(template_entries, offset, binding, entries.images);
 }
 
 } // namespace Vulkan

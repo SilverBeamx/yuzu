@@ -66,6 +66,16 @@ public:
         Rotate270 = 0x07,
     };
 
+    enum class PixelFormat : u32 {
+        RGBA8888 = 1,
+        RGBX8888 = 2,
+        RGB888 = 3,
+        RGB565 = 4,
+        BGRA8888 = 5,
+        RGBA5551 = 6,
+        RRGBA4444 = 7,
+    };
+
     struct Buffer {
         enum class Status { Free = 0, Queued = 1, Dequeued = 2, Acquired = 3 };
 
@@ -87,6 +97,7 @@ public:
                      Service::Nvidia::MultiFence& multi_fence);
     std::optional<std::reference_wrapper<const Buffer>> AcquireBuffer();
     void ReleaseBuffer(u32 slot);
+    void Disconnect();
     u32 Query(QueryType type);
 
     u32 GetId() const {
@@ -101,6 +112,7 @@ private:
     u32 id;
     u64 layer_id;
 
+    std::list<u32> free_buffers;
     std::vector<Buffer> queue;
     std::list<u32> queue_sequence;
     Kernel::EventPair buffer_wait_event;

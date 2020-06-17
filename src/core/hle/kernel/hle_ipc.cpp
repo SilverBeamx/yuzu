@@ -13,7 +13,6 @@
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 #include "common/logging/log.h"
-#include "core/core.h"
 #include "core/hle/ipc_helpers.h"
 #include "core/hle/kernel/handle_table.h"
 #include "core/hle/kernel/hle_ipc.h"
@@ -57,7 +56,6 @@ std::shared_ptr<WritableEvent> HLERequestContext::SleepClientThread(
             return true;
         });
 
-    auto& kernel = Core::System::GetInstance().Kernel();
     if (!writable_event) {
         // Create event if not provided
         const auto pair = WritableEvent::CreateEventPair(kernel, "HLE Pause Event: " + reason);
@@ -79,9 +77,11 @@ std::shared_ptr<WritableEvent> HLERequestContext::SleepClientThread(
     return writable_event;
 }
 
-HLERequestContext::HLERequestContext(std::shared_ptr<Kernel::ServerSession> server_session,
+HLERequestContext::HLERequestContext(KernelCore& kernel, Core::Memory::Memory& memory,
+                                     std::shared_ptr<ServerSession> server_session,
                                      std::shared_ptr<Thread> thread)
-    : server_session(std::move(server_session)), thread(std::move(thread)) {
+    : server_session(std::move(server_session)),
+      thread(std::move(thread)), kernel{kernel}, memory{memory} {
     cmd_buf[0] = 0;
 }
 
@@ -216,7 +216,6 @@ ResultCode HLERequestContext::PopulateFromIncomingCommandBuffer(const HandleTabl
 ResultCode HLERequestContext::WriteToOutgoingCommandBuffer(Thread& thread) {
     auto& owner_process = *thread.GetOwnerProcess();
     auto& handle_table = owner_process.GetHandleTable();
-    auto& memory = Core::System::GetInstance().Memory();
 
     std::array<u32, IPC::COMMAND_BUFFER_LENGTH> dst_cmdbuf;
     memory.ReadBlock(owner_process, thread.GetTLSAddress(), dst_cmdbuf.data(),
@@ -282,11 +281,10 @@ ResultCode HLERequestContext::WriteToOutgoingCommandBuffer(Thread& thread) {
     return RESULT_SUCCESS;
 }
 
-std::vector<u8> HLERequestContext::ReadBuffer(int buffer_index) const {
+std::vector<u8> HLERequestContext::ReadBuffer(std::size_t buffer_index) const {
     std::vector<u8> buffer;
     const bool is_buffer_a{BufferDescriptorA().size() > buffer_index &&
                            BufferDescriptorA()[buffer_index].Size()};
-    auto& memory = Core::System::GetInstance().Memory();
 
     if (is_buffer_a) {
         ASSERT_MSG(BufferDescriptorA().size() > buffer_index,
@@ -304,7 +302,7 @@ std::vector<u8> HLERequestContext::ReadBuffer(int buffer_index) const {
 }
 
 std::size_t HLERequestContext::WriteBuffer(const void* buffer, std::size_t size,
-                                           int buffer_index) const {
+                                           std::size_t buffer_index) const {
     if (size == 0) {
         LOG_WARNING(Core, "skip empty buffer write");
         return 0;
@@ -319,7 +317,6 @@ std::size_t HLERequestContext::WriteBuffer(const void* buffer, std::size_t size,
         size = buffer_size; // TODO(bunnei): This needs to be HW tested
     }
 
-    auto& memory = Core::System::GetInstance().Memory();
     if (is_buffer_b) {
         ASSERT_MSG(BufferDescriptorB().size() > buffer_index,
                    "BufferDescriptorB invalid buffer_index {}", buffer_index);
@@ -337,7 +334,7 @@ std::size_t HLERequestContext::WriteBuffer(const void* buffer, std::size_t size,
     return size;
 }
 
-std::size_t HLERequestContext::GetReadBufferSize(int buffer_index) const {
+std::size_t HLERequestContext::GetReadBufferSize(std::size_t buffer_index) const {
     const bool is_buffer_a{BufferDescriptorA().size() > buffer_index &&
                            BufferDescriptorA()[buffer_index].Size()};
     if (is_buffer_a) {
@@ -355,7 +352,7 @@ std::size_t HLERequestContext::GetReadBufferSize(int buffer_index) const {
     }
 }
 
-std::size_t HLERequestContext::GetWriteBufferSize(int buffer_index) const {
+std::size_t HLERequestContext::GetWriteBufferSize(std::size_t buffer_index) const {
     const bool is_buffer_b{BufferDescriptorB().size() > buffer_index &&
                            BufferDescriptorB()[buffer_index].Size()};
     if (is_buffer_b) {

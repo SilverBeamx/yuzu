@@ -168,18 +168,22 @@ enum class Pred : u64 {
 };
 
 enum class PredCondition : u64 {
-    LessThan = 1,
-    Equal = 2,
-    LessEqual = 3,
-    GreaterThan = 4,
-    NotEqual = 5,
-    GreaterEqual = 6,
-    LessThanWithNan = 9,
-    LessEqualWithNan = 11,
-    GreaterThanWithNan = 12,
-    NotEqualWithNan = 13,
-    GreaterEqualWithNan = 14,
-    // TODO(Subv): Other condition types
+    F = 0,    // Always false
+    LT = 1,   // Ordered less than
+    EQ = 2,   // Ordered equal
+    LE = 3,   // Ordered less than or equal
+    GT = 4,   // Ordered greater than
+    NE = 5,   // Ordered not equal
+    GE = 6,   // Ordered greater than or equal
+    NUM = 7,  // Ordered
+    NAN_ = 8, // Unordered
+    LTU = 9,  // Unordered less than
+    EQU = 10, // Unordered equal
+    LEU = 11, // Unordered less than or equal
+    GTU = 12, // Unordered greater than
+    NEU = 13, // Unordered not equal
+    GEU = 14, // Unordered greater than or equal
+    T = 15,   // Always true
 };
 
 enum class PredOperation : u64 {
@@ -288,6 +292,23 @@ enum class VideoType : u64 {
 enum class VmadShr : u64 {
     Shr7 = 1,
     Shr15 = 2,
+};
+
+enum class VmnmxType : u64 {
+    Bits8,
+    Bits16,
+    Bits32,
+};
+
+enum class VmnmxOperation : u64 {
+    Mrg_16H = 0,
+    Mrg_16L = 1,
+    Mrg_8B0 = 2,
+    Mrg_8B2 = 3,
+    Acc = 4,
+    Min = 5,
+    Max = 6,
+    Nop = 7,
 };
 
 enum class XmadMode : u64 {
@@ -638,6 +659,7 @@ union Instruction {
     }
 
     constexpr Instruction(u64 value) : value{value} {}
+    constexpr Instruction(const Instruction& instr) : value(instr.value) {}
 
     BitField<0, 8, Register> gpr0;
     BitField<8, 8, Register> gpr8;
@@ -796,15 +818,17 @@ union Instruction {
     } alu_integer;
 
     union {
+        BitField<43, 1, u64> x;
+    } iadd;
+
+    union {
         BitField<39, 1, u64> ftz;
         BitField<32, 1, u64> saturate;
         BitField<49, 2, HalfMerge> merge;
 
-        BitField<43, 1, u64> negate_a;
         BitField<44, 1, u64> abs_a;
         BitField<47, 2, HalfType> type_a;
 
-        BitField<31, 1, u64> negate_b;
         BitField<30, 1, u64> abs_b;
         BitField<28, 2, HalfType> type_b;
 
@@ -987,6 +1011,12 @@ union Instruction {
         BitField<48, 3, UniformType> type;
         BitField<46, 2, u64> cache_mode;
     } stg;
+
+    union {
+        BitField<23, 3, AtomicOp> operation;
+        BitField<48, 1, u64> extended;
+        BitField<20, 3, GlobalAtomicType> type;
+    } red;
 
     union {
         BitField<52, 4, AtomicOp> operation;
@@ -1484,7 +1514,7 @@ union Instruction {
 
         TextureType GetTextureType() const {
             // The TLDS instruction has a weird encoding for the texture type.
-            if (texture_info >= 0 && texture_info <= 1) {
+            if (texture_info <= 1) {
                 return TextureType::Texture1D;
             }
             if (texture_info == 2 || texture_info == 8 || texture_info == 12 ||
@@ -1651,6 +1681,42 @@ union Instruction {
     } vmad;
 
     union {
+        BitField<54, 1, u64> is_dest_signed;
+        BitField<48, 1, u64> is_src_a_signed;
+        BitField<49, 1, u64> is_src_b_signed;
+        BitField<37, 2, u64> src_format_a;
+        BitField<29, 2, u64> src_format_b;
+        BitField<56, 1, u64> mx;
+        BitField<55, 1, u64> sat;
+        BitField<36, 2, u64> selector_a;
+        BitField<28, 2, u64> selector_b;
+        BitField<50, 1, u64> is_op_b_register;
+        BitField<51, 3, VmnmxOperation> operation;
+
+        VmnmxType SourceFormatA() const {
+            switch (src_format_a) {
+            case 0b11:
+                return VmnmxType::Bits32;
+            case 0b10:
+                return VmnmxType::Bits16;
+            default:
+                return VmnmxType::Bits8;
+            }
+        }
+
+        VmnmxType SourceFormatB() const {
+            switch (src_format_b) {
+            case 0b11:
+                return VmnmxType::Bits32;
+            case 0b10:
+                return VmnmxType::Bits16;
+            default:
+                return VmnmxType::Bits8;
+            }
+        }
+    } vmnmx;
+
+    union {
         BitField<20, 16, u64> imm20_16;
         BitField<35, 1, u64> high_b_rr; // used on RR
         BitField<36, 1, u64> product_shift_left;
@@ -1712,6 +1778,7 @@ public:
         BRK,
         DEPBAR,
         VOTE,
+        VOTE_VTG,
         SHFL,
         FSWZADD,
         BFE_C,
@@ -1733,6 +1800,7 @@ public:
         ST_S,
         ST,    // Store in generic memory
         STG,   // Store in global memory
+        RED,   // Reduction operation
         ATOM,  // Atomic operation on global memory
         ATOMS, // Atomic operation on shared memory
         AL2P,  // Transforms attribute memory into physical memory
@@ -1758,9 +1826,11 @@ public:
         IPA,
         OUT_R, // Emit vertex/primitive
         ISBERD,
+        BAR,
         MEMBAR,
         VMAD,
         VSETP,
+        VMNMX,
         FFMA_IMM, // Fused Multiply and Add
         FFMA_CR,
         FFMA_RC,
@@ -1815,7 +1885,8 @@ public:
         ICMP_R,
         ICMP_CR,
         ICMP_IMM,
-        FCMP_R,
+        FCMP_RR,
+        FCMP_RC,
         MUFU,  // Multi-Function Operator
         RRO_C, // Range Reduction Operator
         RRO_R,
@@ -1842,7 +1913,7 @@ public:
         MOV_C,
         MOV_R,
         MOV_IMM,
-        MOV_SYS,
+        S2R,
         MOV32_IMM,
         SHL_C,
         SHL_R,
@@ -2026,6 +2097,7 @@ private:
             INST("111000110000----", Id::EXIT, Type::Flow, "EXIT"),
             INST("1111000011110---", Id::DEPBAR, Type::Synch, "DEPBAR"),
             INST("0101000011011---", Id::VOTE, Type::Warp, "VOTE"),
+            INST("0101000011100---", Id::VOTE_VTG, Type::Warp, "VOTE_VTG"),
             INST("1110111100010---", Id::SHFL, Type::Warp, "SHFL"),
             INST("0101000011111---", Id::FSWZADD, Type::Warp, "FSWZADD"),
             INST("1110111111011---", Id::LD_A, Type::Memory, "LD_A"),
@@ -2039,6 +2111,7 @@ private:
             INST("1110111101010---", Id::ST_L, Type::Memory, "ST_L"),
             INST("101-------------", Id::ST, Type::Memory, "ST"),
             INST("1110111011011---", Id::STG, Type::Memory, "STG"),
+            INST("1110101111111---", Id::RED, Type::Memory, "RED"),
             INST("11101101--------", Id::ATOM, Type::Memory, "ATOM"),
             INST("11101100--------", Id::ATOMS, Type::Memory, "ATOMS"),
             INST("1110111110100---", Id::AL2P, Type::Memory, "AL2P"),
@@ -2063,9 +2136,11 @@ private:
             INST("11100000--------", Id::IPA, Type::Trivial, "IPA"),
             INST("1111101111100---", Id::OUT_R, Type::Trivial, "OUT_R"),
             INST("1110111111010---", Id::ISBERD, Type::Trivial, "ISBERD"),
+            INST("1111000010101---", Id::BAR, Type::Trivial, "BAR"),
             INST("1110111110011---", Id::MEMBAR, Type::Trivial, "MEMBAR"),
             INST("01011111--------", Id::VMAD, Type::Video, "VMAD"),
             INST("0101000011110---", Id::VSETP, Type::Video, "VSETP"),
+            INST("0011101---------", Id::VMNMX, Type::Video, "VMNMX"),
             INST("0011001-1-------", Id::FFMA_IMM, Type::Ffma, "FFMA_IMM"),
             INST("010010011-------", Id::FFMA_CR, Type::Ffma, "FFMA_CR"),
             INST("010100011-------", Id::FFMA_RC, Type::Ffma, "FFMA_RC"),
@@ -2120,7 +2195,8 @@ private:
             INST("0101110100100---", Id::HSETP2_R, Type::HalfSetPredicate, "HSETP2_R"),
             INST("0111111-0-------", Id::HSETP2_IMM, Type::HalfSetPredicate, "HSETP2_IMM"),
             INST("0101110100011---", Id::HSET2_R, Type::HalfSet, "HSET2_R"),
-            INST("010110111010----", Id::FCMP_R, Type::Arithmetic, "FCMP_R"),
+            INST("010110111010----", Id::FCMP_RR, Type::Arithmetic, "FCMP_RR"),
+            INST("010010111010----", Id::FCMP_RC, Type::Arithmetic, "FCMP_RC"),
             INST("0101000010000---", Id::MUFU, Type::Arithmetic, "MUFU"),
             INST("0100110010010---", Id::RRO_C, Type::Arithmetic, "RRO_C"),
             INST("0101110010010---", Id::RRO_R, Type::Arithmetic, "RRO_R"),
@@ -2134,7 +2210,7 @@ private:
             INST("0100110010011---", Id::MOV_C, Type::Arithmetic, "MOV_C"),
             INST("0101110010011---", Id::MOV_R, Type::Arithmetic, "MOV_R"),
             INST("0011100-10011---", Id::MOV_IMM, Type::Arithmetic, "MOV_IMM"),
-            INST("1111000011001---", Id::MOV_SYS, Type::Trivial, "MOV_SYS"),
+            INST("1111000011001---", Id::S2R, Type::Trivial, "S2R"),
             INST("000000010000----", Id::MOV32_IMM, Type::ArithmeticImmediate, "MOV32_IMM"),
             INST("0100110001100---", Id::FMNMX_C, Type::Arithmetic, "FMNMX_C"),
             INST("0101110001100---", Id::FMNMX_R, Type::Arithmetic, "FMNMX_R"),
@@ -2166,7 +2242,7 @@ private:
             INST("0011011-11111---", Id::SHF_LEFT_IMM, Type::Shift, "SHF_LEFT_IMM"),
             INST("0100110011100---", Id::I2I_C, Type::Conversion, "I2I_C"),
             INST("0101110011100---", Id::I2I_R, Type::Conversion, "I2I_R"),
-            INST("0011101-11100---", Id::I2I_IMM, Type::Conversion, "I2I_IMM"),
+            INST("0011100-11100---", Id::I2I_IMM, Type::Conversion, "I2I_IMM"),
             INST("0100110010111---", Id::I2F_C, Type::Conversion, "I2F_C"),
             INST("0101110010111---", Id::I2F_R, Type::Conversion, "I2F_R"),
             INST("0011100-10111---", Id::I2F_IMM, Type::Conversion, "I2F_IMM"),

@@ -101,8 +101,8 @@ public:
     }
 
     std::u16string ReadInterfaceToken() {
-        u32 unknown = Read<u32_le>();
-        u32 length = Read<u32_le>();
+        [[maybe_unused]] const u32 unknown = Read<u32_le>();
+        const u32 length = Read<u32_le>();
 
         std::u16string token{};
 
@@ -267,7 +267,7 @@ protected:
 
 private:
     struct Data {
-        u32_le unk_0;
+        u32_le unk_0{};
     };
 
     Data data{};
@@ -513,7 +513,8 @@ private:
 
         auto& buffer_queue = nv_flinger->FindBufferQueue(id);
 
-        if (transaction == TransactionId::Connect) {
+        switch (transaction) {
+        case TransactionId::Connect: {
             IGBPConnectRequestParcel request{ctx.ReadBuffer()};
             IGBPConnectResponseParcel response{
                 static_cast<u32>(static_cast<u32>(DisplayResolution::UndockedWidth) *
@@ -521,14 +522,18 @@ private:
                 static_cast<u32>(static_cast<u32>(DisplayResolution::UndockedHeight) *
                                  Settings::values.resolution_factor)};
             ctx.WriteBuffer(response.Serialize());
-        } else if (transaction == TransactionId::SetPreallocatedBuffer) {
+            break;
+        }
+        case TransactionId::SetPreallocatedBuffer: {
             IGBPSetPreallocatedBufferRequestParcel request{ctx.ReadBuffer()};
 
             buffer_queue.SetPreallocatedBuffer(request.data.slot, request.buffer);
 
             IGBPSetPreallocatedBufferResponseParcel response{};
             ctx.WriteBuffer(response.Serialize());
-        } else if (transaction == TransactionId::DequeueBuffer) {
+            break;
+        }
+        case TransactionId::DequeueBuffer: {
             IGBPDequeueBufferRequestParcel request{ctx.ReadBuffer()};
             const u32 width{request.data.width};
             const u32 height{request.data.height};
@@ -556,14 +561,18 @@ private:
                     },
                     buffer_queue.GetWritableBufferWaitEvent());
             }
-        } else if (transaction == TransactionId::RequestBuffer) {
+            break;
+        }
+        case TransactionId::RequestBuffer: {
             IGBPRequestBufferRequestParcel request{ctx.ReadBuffer()};
 
             auto& buffer = buffer_queue.RequestBuffer(request.slot);
 
             IGBPRequestBufferResponseParcel response{buffer};
             ctx.WriteBuffer(response.Serialize());
-        } else if (transaction == TransactionId::QueueBuffer) {
+            break;
+        }
+        case TransactionId::QueueBuffer: {
             IGBPQueueBufferRequestParcel request{ctx.ReadBuffer()};
 
             buffer_queue.QueueBuffer(request.data.slot, request.data.transform,
@@ -572,7 +581,9 @@ private:
 
             IGBPQueueBufferResponseParcel response{1280, 720};
             ctx.WriteBuffer(response.Serialize());
-        } else if (transaction == TransactionId::Query) {
+            break;
+        }
+        case TransactionId::Query: {
             IGBPQueryRequestParcel request{ctx.ReadBuffer()};
 
             const u32 value =
@@ -580,15 +591,38 @@ private:
 
             IGBPQueryResponseParcel response{value};
             ctx.WriteBuffer(response.Serialize());
-        } else if (transaction == TransactionId::CancelBuffer) {
+            break;
+        }
+        case TransactionId::CancelBuffer: {
             LOG_CRITICAL(Service_VI, "(STUBBED) called, transaction=CancelBuffer");
-        } else if (transaction == TransactionId::Disconnect ||
-                   transaction == TransactionId::DetachBuffer) {
+            break;
+        }
+        case TransactionId::Disconnect: {
+            LOG_WARNING(Service_VI, "(STUBBED) called, transaction=Disconnect");
+            const auto buffer = ctx.ReadBuffer();
+
+            buffer_queue.Disconnect();
+
+            IGBPEmptyResponseParcel response{};
+            ctx.WriteBuffer(response.Serialize());
+            break;
+        }
+        case TransactionId::DetachBuffer: {
             const auto buffer = ctx.ReadBuffer();
 
             IGBPEmptyResponseParcel response{};
             ctx.WriteBuffer(response.Serialize());
-        } else {
+            break;
+        }
+        case TransactionId::SetBufferCount: {
+            LOG_WARNING(Service_VI, "(STUBBED) called, transaction=SetBufferCount");
+            [[maybe_unused]] const auto buffer = ctx.ReadBuffer();
+
+            IGBPEmptyResponseParcel response{};
+            ctx.WriteBuffer(response.Serialize());
+            break;
+        }
+        default:
             ASSERT_MSG(false, "Unimplemented");
         }
 
@@ -833,6 +867,7 @@ private:
 
         const auto layer_id = nv_flinger->CreateLayer(display);
         if (!layer_id) {
+            LOG_ERROR(Service_VI, "Layer not found! display=0x{:016X}", display);
             IPC::ResponseBuilder rb{ctx, 2};
             rb.Push(ERR_NOT_FOUND);
             return;
@@ -949,6 +984,7 @@ private:
 
         const auto display_id = nv_flinger->OpenDisplay(name);
         if (!display_id) {
+            LOG_ERROR(Service_VI, "Display not found! display_name={}", name);
             IPC::ResponseBuilder rb{ctx, 2};
             rb.Push(ERR_NOT_FOUND);
             return;
@@ -1048,6 +1084,7 @@ private:
 
         const auto display_id = nv_flinger->OpenDisplay(display_name);
         if (!display_id) {
+            LOG_ERROR(Service_VI, "Layer not found! layer_id={}", layer_id);
             IPC::ResponseBuilder rb{ctx, 2};
             rb.Push(ERR_NOT_FOUND);
             return;
@@ -1055,6 +1092,7 @@ private:
 
         const auto buffer_queue_id = nv_flinger->FindBufferQueueId(*display_id, layer_id);
         if (!buffer_queue_id) {
+            LOG_ERROR(Service_VI, "Buffer queue id not found! display_id={}", *display_id);
             IPC::ResponseBuilder rb{ctx, 2};
             rb.Push(ERR_NOT_FOUND);
             return;
@@ -1090,6 +1128,7 @@ private:
 
         const auto layer_id = nv_flinger->CreateLayer(display_id);
         if (!layer_id) {
+            LOG_ERROR(Service_VI, "Layer not found! layer_id={}", *layer_id);
             IPC::ResponseBuilder rb{ctx, 2};
             rb.Push(ERR_NOT_FOUND);
             return;
@@ -1097,6 +1136,7 @@ private:
 
         const auto buffer_queue_id = nv_flinger->FindBufferQueueId(display_id, *layer_id);
         if (!buffer_queue_id) {
+            LOG_ERROR(Service_VI, "Buffer queue id not found! display_id={}", display_id);
             IPC::ResponseBuilder rb{ctx, 2};
             rb.Push(ERR_NOT_FOUND);
             return;
@@ -1127,6 +1167,7 @@ private:
 
         const auto vsync_event = nv_flinger->FindVsyncEvent(display_id);
         if (!vsync_event) {
+            LOG_ERROR(Service_VI, "Vsync event was not found for display_id={}", display_id);
             IPC::ResponseBuilder rb{ctx, 2};
             rb.Push(ERR_NOT_FOUND);
             return;
@@ -1167,6 +1208,7 @@ private:
         case NintendoScaleMode::PreserveAspectRatio:
             return MakeResult(ConvertedScaleMode::PreserveAspectRatio);
         default:
+            LOG_ERROR(Service_VI, "Invalid scaling mode specified, mode={}", mode);
             return ERR_OPERATION_FAILED;
         }
     }
@@ -1223,6 +1265,7 @@ void detail::GetDisplayServiceImpl(Kernel::HLERequestContext& ctx,
     const auto policy = rp.PopEnum<Policy>();
 
     if (!IsValidServiceAccess(permission, policy)) {
+        LOG_ERROR(Service_VI, "Permission denied for policy {}", static_cast<u32>(policy));
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ERR_PERMISSION_DENIED);
         return;

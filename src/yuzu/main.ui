@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1081</width>
-    <height>730</height>
+    <width>1280</width>
+    <height>720</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -44,7 +44,7 @@
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>1081</width>
+     <width>1280</width>
      <height>21</height>
     </rect>
    </property>
@@ -64,8 +64,6 @@
     <addaction name="separator"/>
     <addaction name="menu_recent_files"/>
     <addaction name="separator"/>
-    <addaction name="action_Select_NAND_Directory"/>
-    <addaction name="action_Select_SDMC_Directory"/>
     <addaction name="separator"/>
     <addaction name="action_Load_Amiibo"/>
     <addaction name="separator"/>
@@ -98,6 +96,7 @@
     <addaction name="action_Display_Dock_Widget_Headers"/>
     <addaction name="action_Show_Filter_Bar"/>
     <addaction name="action_Show_Status_Bar"/>
+    <addaction name="action_Reset_Window_Size"/>
     <addaction name="separator"/>
     <addaction name="menu_View_Debugging"/>
    </widget>
@@ -217,20 +216,9 @@
     <string>Show Status Bar</string>
    </property>
   </action>
-  <action name="action_Select_NAND_Directory">
+  <action name="action_Reset_Window_Size">
    <property name="text">
-    <string>Select NAND Directory...</string>
-   </property>
-   <property name="toolTip">
-    <string>Selects a folder to use as the root of the emulated NAND</string>
-   </property>
-  </action>
-  <action name="action_Select_SDMC_Directory">
-   <property name="text">
-    <string>Select SD Card Directory...</string>
-   </property>
-   <property name="toolTip">
-    <string>Selects a folder to use as the root of the emulated SD card</string>
+    <string>Reset Window Size</string>
    </property>
   </action>
   <action name="action_Fullscreen">

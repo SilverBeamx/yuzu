@@ -15,46 +15,9 @@
 #include "ui_configure_graphics.h"
 #include "yuzu/configuration/configure_graphics.h"
 
-namespace {
-enum class Resolution : int {
-    Auto,
-    Scale1x,
-    Scale2x,
-    Scale3x,
-    Scale4x,
-};
-
-float ToResolutionFactor(Resolution option) {
-    switch (option) {
-    case Resolution::Auto:
-        return 0.f;
-    case Resolution::Scale1x:
-        return 1.f;
-    case Resolution::Scale2x:
-        return 2.f;
-    case Resolution::Scale3x:
-        return 3.f;
-    case Resolution::Scale4x:
-        return 4.f;
-    }
-    return 0.f;
-}
-
-Resolution FromResolutionFactor(float factor) {
-    if (factor == 0.f) {
-        return Resolution::Auto;
-    } else if (factor == 1.f) {
-        return Resolution::Scale1x;
-    } else if (factor == 2.f) {
-        return Resolution::Scale2x;
-    } else if (factor == 3.f) {
-        return Resolution::Scale3x;
-    } else if (factor == 4.f) {
-        return Resolution::Scale4x;
-    }
-    return Resolution::Auto;
-}
-} // Anonymous namespace
+#ifdef HAS_VULKAN
+#include "video_core/renderer_vulkan/renderer_vulkan.h"
+#endif
 
 ConfigureGraphics::ConfigureGraphics(QWidget* parent)
     : QWidget(parent), ui(new Ui::ConfigureGraphics) {
@@ -95,8 +58,6 @@ void ConfigureGraphics::SetConfiguration() {
 
     ui->api->setEnabled(runtime_lock);
     ui->api->setCurrentIndex(static_cast<int>(Settings::values.renderer_backend));
-    ui->resolution_factor_combobox->setCurrentIndex(
-        static_cast<int>(FromResolutionFactor(Settings::values.resolution_factor)));
     ui->aspect_ratio_combobox->setCurrentIndex(Settings::values.aspect_ratio);
     ui->use_disk_shader_cache->setEnabled(runtime_lock);
     ui->use_disk_shader_cache->setChecked(Settings::values.use_disk_shader_cache);
@@ -110,8 +71,6 @@ void ConfigureGraphics::SetConfiguration() {
 void ConfigureGraphics::ApplyConfiguration() {
     Settings::values.renderer_backend = GetCurrentGraphicsBackend();
     Settings::values.vulkan_device = vulkan_device;
-    Settings::values.resolution_factor =
-        ToResolutionFactor(static_cast<Resolution>(ui->resolution_factor_combobox->currentIndex()));
     Settings::values.aspect_ratio = ui->aspect_ratio_combobox->currentIndex();
     Settings::values.use_disk_shader_cache = ui->use_disk_shader_cache->isChecked();
     Settings::values.use_asynchronous_gpu_emulation =
@@ -165,41 +124,9 @@ void ConfigureGraphics::UpdateDeviceComboBox() {
 
 void ConfigureGraphics::RetrieveVulkanDevices() {
 #ifdef HAS_VULKAN
-    QVulkanInstance instance;
-    instance.setApiVersion(QVersionNumber(1, 1, 0));
-    if (!instance.create()) {
-        LOG_INFO(Frontend, "Vulkan 1.1 not available");
-        return;
-    }
-    const auto vkEnumeratePhysicalDevices{reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
-        instance.getInstanceProcAddr("vkEnumeratePhysicalDevices"))};
-    if (vkEnumeratePhysicalDevices == nullptr) {
-        LOG_INFO(Frontend, "Failed to get pointer to vkEnumeratePhysicalDevices");
-        return;
-    }
-    u32 physical_device_count;
-    if (vkEnumeratePhysicalDevices(instance.vkInstance(), &physical_device_count, nullptr) !=
-        VK_SUCCESS) {
-        LOG_INFO(Frontend, "Failed to get physical devices count");
-        return;
-    }
-    std::vector<VkPhysicalDevice> physical_devices(physical_device_count);
-    if (vkEnumeratePhysicalDevices(instance.vkInstance(), &physical_device_count,
-                                   physical_devices.data()) != VK_SUCCESS) {
-        LOG_INFO(Frontend, "Failed to get physical devices");
-        return;
-    }
-
-    const auto vkGetPhysicalDeviceProperties{reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
-        instance.getInstanceProcAddr("vkGetPhysicalDeviceProperties"))};
-    if (vkGetPhysicalDeviceProperties == nullptr) {
-        LOG_INFO(Frontend, "Failed to get pointer to vkGetPhysicalDeviceProperties");
-        return;
-    }
-    for (const auto physical_device : physical_devices) {
-        VkPhysicalDeviceProperties properties;
-        vkGetPhysicalDeviceProperties(physical_device, &properties);
-        vulkan_devices.push_back(QString::fromUtf8(properties.deviceName));
+    vulkan_devices.clear();
+    for (auto& name : Vulkan::RendererVulkan::EnumerateDevices()) {
+        vulkan_devices.push_back(QString::fromStdString(name));
     }
 #endif
 }

@@ -5,17 +5,13 @@
 #pragma once
 
 #include <memory>
-#include <unordered_map>
-#include <vector>
 
 #include "common/common_types.h"
 #include "video_core/buffer_cache/buffer_cache.h"
-#include "video_core/rasterizer_cache.h"
-#include "video_core/renderer_vulkan/declarations.h"
 #include "video_core/renderer_vulkan/vk_memory_manager.h"
-#include "video_core/renderer_vulkan/vk_resource_manager.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_stream_buffer.h"
+#include "video_core/renderer_vulkan/wrapper.h"
 
 namespace Core {
 class System;
@@ -27,37 +23,31 @@ class VKDevice;
 class VKMemoryManager;
 class VKScheduler;
 
-class CachedBufferBlock final : public VideoCommon::BufferBlock {
+class Buffer final : public VideoCommon::BufferBlock {
 public:
-    explicit CachedBufferBlock(const VKDevice& device, VKMemoryManager& memory_manager,
-                               CacheAddr cache_addr, std::size_t size);
-    ~CachedBufferBlock();
+    explicit Buffer(const VKDevice& device, VKMemoryManager& memory_manager, VAddr cpu_addr,
+                    std::size_t size);
+    ~Buffer();
 
-    const vk::Buffer* GetHandle() const {
-        return &*buffer.handle;
+    VkBuffer Handle() const {
+        return *buffer.handle;
     }
 
 private:
     VKBuffer buffer;
 };
 
-using Buffer = std::shared_ptr<CachedBufferBlock>;
-
-class VKBufferCache final : public VideoCommon::BufferCache<Buffer, vk::Buffer, VKStreamBuffer> {
+class VKBufferCache final : public VideoCommon::BufferCache<Buffer, VkBuffer, VKStreamBuffer> {
 public:
     explicit VKBufferCache(VideoCore::RasterizerInterface& rasterizer, Core::System& system,
                            const VKDevice& device, VKMemoryManager& memory_manager,
                            VKScheduler& scheduler, VKStagingBufferPool& staging_pool);
     ~VKBufferCache();
 
-    const vk::Buffer* GetEmptyBuffer(std::size_t size) override;
+    VkBuffer GetEmptyBuffer(std::size_t size) override;
 
 protected:
-    void WriteBarrier() override {}
-
-    Buffer CreateBlock(CacheAddr cache_addr, std::size_t size) override;
-
-    const vk::Buffer* ToHandle(const Buffer& buffer) override;
+    std::shared_ptr<Buffer> CreateBlock(VAddr cpu_addr, std::size_t size) override;
 
     void UploadBlockData(const Buffer& buffer, std::size_t offset, std::size_t size,
                          const u8* data) override;

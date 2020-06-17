@@ -110,13 +110,20 @@ enum class OperationCode {
     LogicalPick2,  /// (bool2 pair, uint index) -> bool
     LogicalAnd2,   /// (bool2 a) -> bool
 
-    LogicalFLessThan,     /// (float a, float b) -> bool
-    LogicalFEqual,        /// (float a, float b) -> bool
-    LogicalFLessEqual,    /// (float a, float b) -> bool
-    LogicalFGreaterThan,  /// (float a, float b) -> bool
-    LogicalFNotEqual,     /// (float a, float b) -> bool
-    LogicalFGreaterEqual, /// (float a, float b) -> bool
-    LogicalFIsNan,        /// (float a) -> bool
+    LogicalFOrdLessThan,       /// (float a, float b) -> bool
+    LogicalFOrdEqual,          /// (float a, float b) -> bool
+    LogicalFOrdLessEqual,      /// (float a, float b) -> bool
+    LogicalFOrdGreaterThan,    /// (float a, float b) -> bool
+    LogicalFOrdNotEqual,       /// (float a, float b) -> bool
+    LogicalFOrdGreaterEqual,   /// (float a, float b) -> bool
+    LogicalFOrdered,           /// (float a, float b) -> bool
+    LogicalFUnordered,         /// (float a, float b) -> bool
+    LogicalFUnordLessThan,     /// (float a, float b) -> bool
+    LogicalFUnordEqual,        /// (float a, float b) -> bool
+    LogicalFUnordLessEqual,    /// (float a, float b) -> bool
+    LogicalFUnordGreaterThan,  /// (float a, float b) -> bool
+    LogicalFUnordNotEqual,     /// (float a, float b) -> bool
+    LogicalFUnordGreaterEqual, /// (float a, float b) -> bool
 
     LogicalILessThan,     /// (int a, int b) -> bool
     LogicalIEqual,        /// (int a, int b) -> bool
@@ -131,6 +138,8 @@ enum class OperationCode {
     LogicalUGreaterThan,  /// (uint a, uint b) -> bool
     LogicalUNotEqual,     /// (uint a, uint b) -> bool
     LogicalUGreaterEqual, /// (uint a, uint b) -> bool
+
+    LogicalAddCarry, /// (uint a, uint b) -> bool
 
     Logical2HLessThan,            /// (MetaHalfArithmetic, f16vec2 a, f16vec2) -> bool2
     Logical2HEqual,               /// (MetaHalfArithmetic, f16vec2 a, f16vec2) -> bool2
@@ -178,6 +187,20 @@ enum class OperationCode {
     AtomicIOr,       /// (memory, int) -> int
     AtomicIXor,      /// (memory, int) -> int
 
+    ReduceUAdd, /// (memory, uint) -> void
+    ReduceUMin, /// (memory, uint) -> void
+    ReduceUMax, /// (memory, uint) -> void
+    ReduceUAnd, /// (memory, uint) -> void
+    ReduceUOr,  /// (memory, uint) -> void
+    ReduceUXor, /// (memory, uint) -> void
+
+    ReduceIAdd, /// (memory, int) -> void
+    ReduceIMin, /// (memory, int) -> void
+    ReduceIMax, /// (memory, int) -> void
+    ReduceIAnd, /// (memory, int) -> void
+    ReduceIOr,  /// (memory, int) -> void
+    ReduceIXor, /// (memory, int) -> void
+
     Branch,         /// (uint branch_target) -> void
     BranchIndirect, /// (uint branch_target) -> void
     PushFlowStack,  /// (uint branch_target) -> void
@@ -203,9 +226,16 @@ enum class OperationCode {
     VoteEqual,    /// (bool) -> bool
 
     ThreadId,       /// () -> uint
+    ThreadEqMask,   /// () -> uint
+    ThreadGeMask,   /// () -> uint
+    ThreadGtMask,   /// () -> uint
+    ThreadLeMask,   /// () -> uint
+    ThreadLtMask,   /// () -> uint
     ShuffleIndexed, /// (uint value, uint index) -> uint
 
-    MemoryBarrierGL, /// () -> void
+    Barrier,             /// () -> void
+    MemoryBarrierGroup,  /// () -> void
+    MemoryBarrierGlobal, /// () -> void
 
     Amount,
 };
@@ -245,133 +275,76 @@ using Node = std::shared_ptr<NodeData>;
 using Node4 = std::array<Node, 4>;
 using NodeBlock = std::vector<Node>;
 
-class BindlessSamplerNode;
-class ArraySamplerNode;
+struct ArraySamplerNode;
+struct BindlessSamplerNode;
+struct SeparateSamplerNode;
 
-using TrackSamplerData = std::variant<BindlessSamplerNode, ArraySamplerNode>;
+using TrackSamplerData = std::variant<BindlessSamplerNode, SeparateSamplerNode, ArraySamplerNode>;
 using TrackSampler = std::shared_ptr<TrackSamplerData>;
 
-class Sampler {
-public:
-    /// This constructor is for bound samplers
+struct Sampler {
+    /// Bound samplers constructor
     constexpr explicit Sampler(u32 index, u32 offset, Tegra::Shader::TextureType type,
                                bool is_array, bool is_shadow, bool is_buffer, bool is_indexed)
         : index{index}, offset{offset}, type{type}, is_array{is_array}, is_shadow{is_shadow},
           is_buffer{is_buffer}, is_indexed{is_indexed} {}
 
-    /// This constructor is for bindless samplers
+    /// Separate sampler constructor
+    constexpr explicit Sampler(u32 index, std::pair<u32, u32> offsets, std::pair<u32, u32> buffers,
+                               Tegra::Shader::TextureType type, bool is_array, bool is_shadow,
+                               bool is_buffer)
+        : index{index}, offset{offsets.first}, secondary_offset{offsets.second},
+          buffer{buffers.first}, secondary_buffer{buffers.second}, type{type}, is_array{is_array},
+          is_shadow{is_shadow}, is_buffer{is_buffer}, is_separated{true} {}
+
+    /// Bindless samplers constructor
     constexpr explicit Sampler(u32 index, u32 offset, u32 buffer, Tegra::Shader::TextureType type,
                                bool is_array, bool is_shadow, bool is_buffer, bool is_indexed)
         : index{index}, offset{offset}, buffer{buffer}, type{type}, is_array{is_array},
           is_shadow{is_shadow}, is_buffer{is_buffer}, is_bindless{true}, is_indexed{is_indexed} {}
 
-    constexpr u32 GetIndex() const {
-        return index;
-    }
-
-    constexpr u32 GetOffset() const {
-        return offset;
-    }
-
-    constexpr u32 GetBuffer() const {
-        return buffer;
-    }
-
-    constexpr Tegra::Shader::TextureType GetType() const {
-        return type;
-    }
-
-    constexpr bool IsArray() const {
-        return is_array;
-    }
-
-    constexpr bool IsShadow() const {
-        return is_shadow;
-    }
-
-    constexpr bool IsBuffer() const {
-        return is_buffer;
-    }
-
-    constexpr bool IsBindless() const {
-        return is_bindless;
-    }
-
-    constexpr bool IsIndexed() const {
-        return is_indexed;
-    }
-
-    constexpr u32 Size() const {
-        return size;
-    }
-
-    constexpr void SetSize(u32 new_size) {
-        size = new_size;
-    }
-
-private:
-    u32 index{};  ///< Emulated index given for the this sampler.
-    u32 offset{}; ///< Offset in the const buffer from where the sampler is being read.
-    u32 buffer{}; ///< Buffer where the bindless sampler is being read (unused on bound samplers).
-    u32 size{1};  ///< Size of the sampler.
+    u32 index = 0;            ///< Emulated index given for the this sampler.
+    u32 offset = 0;           ///< Offset in the const buffer from where the sampler is being read.
+    u32 secondary_offset = 0; ///< Secondary offset in the const buffer.
+    u32 buffer = 0;           ///< Buffer where the bindless sampler is read.
+    u32 secondary_buffer = 0; ///< Secondary buffer where the bindless sampler is read.
+    u32 size = 1;             ///< Size of the sampler.
 
     Tegra::Shader::TextureType type{}; ///< The type used to sample this texture (Texture2D, etc)
-    bool is_array{};    ///< Whether the texture is being sampled as an array texture or not.
-    bool is_shadow{};   ///< Whether the texture is being sampled as a depth texture or not.
-    bool is_buffer{};   ///< Whether the texture is a texture buffer without sampler.
-    bool is_bindless{}; ///< Whether this sampler belongs to a bindless texture or not.
-    bool is_indexed{};  ///< Whether this sampler is an indexed array of textures.
+    bool is_array = false;     ///< Whether the texture is being sampled as an array texture or not.
+    bool is_shadow = false;    ///< Whether the texture is being sampled as a depth texture or not.
+    bool is_buffer = false;    ///< Whether the texture is a texture buffer without sampler.
+    bool is_bindless = false;  ///< Whether this sampler belongs to a bindless texture or not.
+    bool is_indexed = false;   ///< Whether this sampler is an indexed array of textures.
+    bool is_separated = false; ///< Whether the image and sampler is separated or not.
 };
 
 /// Represents a tracked bindless sampler into a direct const buffer
-class ArraySamplerNode final {
-public:
-    explicit ArraySamplerNode(u32 index, u32 base_offset, u32 bindless_var)
-        : index{index}, base_offset{base_offset}, bindless_var{bindless_var} {}
-
-    constexpr u32 GetIndex() const {
-        return index;
-    }
-
-    constexpr u32 GetBaseOffset() const {
-        return base_offset;
-    }
-
-    constexpr u32 GetIndexVar() const {
-        return bindless_var;
-    }
-
-private:
+struct ArraySamplerNode {
     u32 index;
     u32 base_offset;
     u32 bindless_var;
 };
 
+/// Represents a tracked separate sampler image pair that was folded statically
+struct SeparateSamplerNode {
+    std::pair<u32, u32> indices;
+    std::pair<u32, u32> offsets;
+};
+
 /// Represents a tracked bindless sampler into a direct const buffer
-class BindlessSamplerNode final {
-public:
-    explicit BindlessSamplerNode(u32 index, u32 offset) : index{index}, offset{offset} {}
-
-    constexpr u32 GetIndex() const {
-        return index;
-    }
-
-    constexpr u32 GetOffset() const {
-        return offset;
-    }
-
-private:
+struct BindlessSamplerNode {
     u32 index;
     u32 offset;
 };
 
-class Image final {
+struct Image {
 public:
-    /// This constructor is for bound images
+    /// Bound images constructor
     constexpr explicit Image(u32 index, u32 offset, Tegra::Shader::ImageType type)
         : index{index}, offset{offset}, type{type} {}
 
-    /// This constructor is for bindless samplers
+    /// Bindless samplers constructor
     constexpr explicit Image(u32 index, u32 offset, u32 buffer, Tegra::Shader::ImageType type)
         : index{index}, offset{offset}, buffer{buffer}, type{type}, is_bindless{true} {}
 
@@ -389,53 +362,20 @@ public:
         is_atomic = true;
     }
 
-    constexpr u32 GetIndex() const {
-        return index;
-    }
-
-    constexpr u32 GetOffset() const {
-        return offset;
-    }
-
-    constexpr u32 GetBuffer() const {
-        return buffer;
-    }
-
-    constexpr Tegra::Shader::ImageType GetType() const {
-        return type;
-    }
-
-    constexpr bool IsBindless() const {
-        return is_bindless;
-    }
-
-    constexpr bool IsWritten() const {
-        return is_written;
-    }
-
-    constexpr bool IsRead() const {
-        return is_read;
-    }
-
-    constexpr bool IsAtomic() const {
-        return is_atomic;
-    }
-
-private:
-    u32 index{};
-    u32 offset{};
-    u32 buffer{};
+    u32 index = 0;
+    u32 offset = 0;
+    u32 buffer = 0;
 
     Tegra::Shader::ImageType type{};
-    bool is_bindless{};
-    bool is_written{};
-    bool is_read{};
-    bool is_atomic{};
+    bool is_bindless = false;
+    bool is_written = false;
+    bool is_read = false;
+    bool is_atomic = false;
 };
 
 struct GlobalMemoryBase {
-    u32 cbuf_index{};
-    u32 cbuf_offset{};
+    u32 cbuf_index = 0;
+    u32 cbuf_offset = 0;
 
     bool operator<(const GlobalMemoryBase& rhs) const {
         return std::tie(cbuf_index, cbuf_offset) < std::tie(rhs.cbuf_index, rhs.cbuf_offset);
@@ -449,7 +389,7 @@ struct MetaArithmetic {
 
 /// Parameters describing a texture sampler
 struct MetaTexture {
-    const Sampler& sampler;
+    Sampler sampler;
     Node array;
     Node depth_compare;
     std::vector<Node> aoffi;

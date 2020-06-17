@@ -29,6 +29,11 @@ enum class TitleVersionFormat : u8 {
 std::string FormatTitleVersion(u32 version,
                                TitleVersionFormat format = TitleVersionFormat::ThreeElements);
 
+// Returns a directory with name matching name case-insensitive. Returns nullptr if directory
+// doesn't have a directory with name.
+std::shared_ptr<VfsDirectory> FindSubdirectoryCaseless(const std::shared_ptr<VfsDirectory> dir,
+                                                       std::string_view name);
+
 // A centralized class to manage patches to games.
 class PatchManager {
 public:
@@ -51,8 +56,8 @@ public:
     bool HasNSOPatch(const std::array<u8, 0x20>& build_id) const;
 
     // Creates a CheatList object with all
-    std::vector<Memory::CheatEntry> CreateCheatList(const Core::System& system,
-                                                    const std::array<u8, 0x20>& build_id) const;
+    std::vector<Core::Memory::CheatEntry> CreateCheatList(
+        const Core::System& system, const std::array<u8, 0x20>& build_id) const;
 
     // Currently tracked RomFS patches:
     // - Game Updates

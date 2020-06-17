@@ -61,8 +61,8 @@ struct TextureDerivates {};
 using TextureArgument = std::pair<Type, Node>;
 using TextureIR = std::variant<TextureOffset, TextureDerivates, TextureArgument>;
 
-constexpr u32 MAX_CONSTBUFFER_ELEMENTS =
-    static_cast<u32>(Maxwell::MaxConstBufferSize) / (4 * sizeof(float));
+constexpr u32 MAX_CONSTBUFFER_SCALARS = static_cast<u32>(Maxwell::MaxConstBufferSize) / sizeof(u32);
+constexpr u32 MAX_CONSTBUFFER_ELEMENTS = MAX_CONSTBUFFER_SCALARS / sizeof(u32);
 
 constexpr std::string_view CommonDeclarations = R"(#define ftoi floatBitsToInt
 #define ftou floatBitsToUint
@@ -402,6 +402,13 @@ std::string FlowStackTopName(MetaStackClass stack) {
     return fmt::format("{}_flow_stack_top", GetFlowStackPrefix(stack));
 }
 
+bool UseUnifiedUniforms(const Device& device, const ShaderIR& ir, ShaderType stage) {
+    const u32 num_ubos = static_cast<u32>(ir.GetConstantBuffers().size());
+    // We waste one UBO for emulation
+    const u32 num_available_ubos = device.GetMaxUniformBuffers(stage) - 1;
+    return num_ubos > num_available_ubos;
+}
+
 struct GenericVaryingDescription {
     std::string name;
     u8 first_element = 0;
@@ -412,8 +419,9 @@ class GLSLDecompiler final {
 public:
     explicit GLSLDecompiler(const Device& device, const ShaderIR& ir, const Registry& registry,
                             ShaderType stage, std::string_view identifier, std::string_view suffix)
-        : device{device}, ir{ir}, registry{registry}, stage{stage},
-          identifier{identifier}, suffix{suffix}, header{ir.GetHeader()} {
+        : device{device}, ir{ir}, registry{registry}, stage{stage}, identifier{identifier},
+          suffix{suffix}, header{ir.GetHeader()}, use_unified_uniforms{
+                                                      UseUnifiedUniforms(device, ir, stage)} {
         if (stage != ShaderType::Compute) {
             transform_feedback = BuildTransformFeedback(registry.GetGraphicsInfo());
         }
@@ -484,7 +492,7 @@ private:
         code.AddLine("switch (jmp_to) {{");
 
         for (const auto& pair : ir.GetBasicBlocks()) {
-            const auto [address, bb] = pair;
+            const auto& [address, bb] = pair;
             code.AddLine("case 0x{:X}U: {{", address);
             ++code.scope;
 
@@ -618,7 +626,9 @@ private:
                 break;
             }
         }
-        if (stage != ShaderType::Vertex || device.HasVertexViewportLayer()) {
+
+        if (stage != ShaderType::Geometry &&
+            (stage != ShaderType::Vertex || device.HasVertexViewportLayer())) {
             if (ir.UsesLayer()) {
                 code.AddLine("int gl_Layer;");
             }
@@ -646,6 +656,16 @@ private:
 
         --code.scope;
         code.AddLine("}};");
+        code.AddNewLine();
+
+        if (stage == ShaderType::Geometry) {
+            if (ir.UsesLayer()) {
+                code.AddLine("out int gl_Layer;");
+            }
+            if (ir.UsesViewportIndex()) {
+                code.AddLine("out int gl_ViewportIndex;");
+            }
+        }
         code.AddNewLine();
     }
 
@@ -834,11 +854,24 @@ private:
     }
 
     void DeclareConstantBuffers() {
+        if (use_unified_uniforms) {
+            const u32 binding = device.GetBaseBindings(stage).shader_storage_buffer +
+                                static_cast<u32>(ir.GetGlobalMemory().size());
+            code.AddLine("layout (std430, binding = {}) readonly buffer UnifiedUniforms {{",
+                         binding);
+            code.AddLine("    uint cbufs[];");
+            code.AddLine("}};");
+            code.AddNewLine();
+            return;
+        }
+
         u32 binding = device.GetBaseBindings(stage).uniform_buffer;
-        for (const auto& [index, cbuf] : ir.GetConstantBuffers()) {
+        for (const auto [index, info] : ir.GetConstantBuffers()) {
+            const u32 num_elements = Common::AlignUp(info.GetSize(), 4) / 4;
+            const u32 size = info.IsIndirect() ? MAX_CONSTBUFFER_ELEMENTS : num_elements;
             code.AddLine("layout (std140, binding = {}) uniform {} {{", binding++,
                          GetConstBufferBlock(index));
-            code.AddLine("    uvec4 {}[{}];", GetConstBuffer(index), MAX_CONSTBUFFER_ELEMENTS);
+            code.AddLine("    uvec4 {}[{}];", GetConstBuffer(index), size);
             code.AddLine("}};");
             code.AddNewLine();
         }
@@ -869,13 +902,13 @@ private:
         for (const auto& sampler : ir.GetSamplers()) {
             const std::string name = GetSampler(sampler);
             const std::string description = fmt::format("layout (binding = {}) uniform", binding);
-            binding += sampler.IsIndexed() ? sampler.Size() : 1;
+            binding += sampler.is_indexed ? sampler.size : 1;
 
             std::string sampler_type = [&]() {
-                if (sampler.IsBuffer()) {
+                if (sampler.is_buffer) {
                     return "samplerBuffer";
                 }
-                switch (sampler.GetType()) {
+                switch (sampler.type) {
                 case Tegra::Shader::TextureType::Texture1D:
                     return "sampler1D";
                 case Tegra::Shader::TextureType::Texture2D:
@@ -889,17 +922,17 @@ private:
                     return "sampler2D";
                 }
             }();
-            if (sampler.IsArray()) {
+            if (sampler.is_array) {
                 sampler_type += "Array";
             }
-            if (sampler.IsShadow()) {
+            if (sampler.is_shadow) {
                 sampler_type += "Shadow";
             }
 
-            if (!sampler.IsIndexed()) {
+            if (!sampler.is_indexed) {
                 code.AddLine("{} {} {};", description, sampler_type, name);
             } else {
-                code.AddLine("{} {} {}[{}];", description, sampler_type, name, sampler.Size());
+                code.AddLine("{} {} {}[{}];", description, sampler_type, name, sampler.size);
             }
         }
         if (!ir.GetSamplers().empty()) {
@@ -945,14 +978,14 @@ private:
         u32 binding = device.GetBaseBindings(stage).image;
         for (const auto& image : ir.GetImages()) {
             std::string qualifier = "coherent volatile";
-            if (image.IsRead() && !image.IsWritten()) {
+            if (image.is_read && !image.is_written) {
                 qualifier += " readonly";
-            } else if (image.IsWritten() && !image.IsRead()) {
+            } else if (image.is_written && !image.is_read) {
                 qualifier += " writeonly";
             }
 
-            const char* format = image.IsAtomic() ? "r32ui, " : "";
-            const char* type_declaration = GetImageTypeDeclaration(image.GetType());
+            const char* format = image.is_atomic ? "r32ui, " : "";
+            const char* type_declaration = GetImageTypeDeclaration(image.type);
             code.AddLine("layout ({}binding = {}) {} uniform uimage{} {};", format, binding++,
                          qualifier, type_declaration, GetImage(image));
         }
@@ -1037,42 +1070,51 @@ private:
 
         if (const auto cbuf = std::get_if<CbufNode>(&*node)) {
             const Node offset = cbuf->GetOffset();
+            const u32 base_unified_offset = cbuf->GetIndex() * MAX_CONSTBUFFER_SCALARS;
+
             if (const auto immediate = std::get_if<ImmediateNode>(&*offset)) {
                 // Direct access
                 const u32 offset_imm = immediate->GetValue();
                 ASSERT_MSG(offset_imm % 4 == 0, "Unaligned cbuf direct access");
-                return {fmt::format("{}[{}][{}]", GetConstBuffer(cbuf->GetIndex()),
-                                    offset_imm / (4 * 4), (offset_imm / 4) % 4),
+                if (use_unified_uniforms) {
+                    return {fmt::format("cbufs[{}]", base_unified_offset + offset_imm / 4),
+                            Type::Uint};
+                } else {
+                    return {fmt::format("{}[{}][{}]", GetConstBuffer(cbuf->GetIndex()),
+                                        offset_imm / (4 * 4), (offset_imm / 4) % 4),
+                            Type::Uint};
+                }
+            }
+
+            // Indirect access
+            if (use_unified_uniforms) {
+                return {fmt::format("cbufs[{} + ({} >> 2)]", base_unified_offset,
+                                    Visit(offset).AsUint()),
                         Type::Uint};
             }
 
-            if (std::holds_alternative<OperationNode>(*offset)) {
-                // Indirect access
-                const std::string final_offset = code.GenerateTemporary();
-                code.AddLine("uint {} = {} >> 2;", final_offset, Visit(offset).AsUint());
+            const std::string final_offset = code.GenerateTemporary();
+            code.AddLine("uint {} = {} >> 2;", final_offset, Visit(offset).AsUint());
 
-                if (!device.HasComponentIndexingBug()) {
-                    return {fmt::format("{}[{} >> 2][{} & 3]", GetConstBuffer(cbuf->GetIndex()),
-                                        final_offset, final_offset),
-                            Type::Uint};
-                }
-
-                // AMD's proprietary GLSL compiler emits ill code for variable component access.
-                // To bypass this driver bug generate 4 ifs, one per each component.
-                const std::string pack = code.GenerateTemporary();
-                code.AddLine("uvec4 {} = {}[{} >> 2];", pack, GetConstBuffer(cbuf->GetIndex()),
-                             final_offset);
-
-                const std::string result = code.GenerateTemporary();
-                code.AddLine("uint {};", result);
-                for (u32 swizzle = 0; swizzle < 4; ++swizzle) {
-                    code.AddLine("if (({} & 3) == {}) {} = {}{};", final_offset, swizzle, result,
-                                 pack, GetSwizzle(swizzle));
-                }
-                return {result, Type::Uint};
+            if (!device.HasComponentIndexingBug()) {
+                return {fmt::format("{}[{} >> 2][{} & 3]", GetConstBuffer(cbuf->GetIndex()),
+                                    final_offset, final_offset),
+                        Type::Uint};
             }
 
-            UNREACHABLE_MSG("Unmanaged offset node type");
+            // AMD's proprietary GLSL compiler emits ill code for variable component access.
+            // To bypass this driver bug generate 4 ifs, one per each component.
+            const std::string pack = code.GenerateTemporary();
+            code.AddLine("uvec4 {} = {}[{} >> 2];", pack, GetConstBuffer(cbuf->GetIndex()),
+                         final_offset);
+
+            const std::string result = code.GenerateTemporary();
+            code.AddLine("uint {};", result);
+            for (u32 swizzle = 0; swizzle < 4; ++swizzle) {
+                code.AddLine("if (({} & 3) == {}) {} = {}{};", final_offset, swizzle, result, pack,
+                             GetSwizzle(swizzle));
+            }
+            return {result, Type::Uint};
         }
 
         if (const auto gmem = std::get_if<GmemNode>(&*node)) {
@@ -1144,6 +1186,7 @@ private:
                 return {"gl_FragCoord"s + GetSwizzle(element), Type::Float};
             default:
                 UNREACHABLE();
+                return {"0", Type::Int};
             }
         case Attribute::Index::FrontColor:
             return {"gl_Color"s + GetSwizzle(element), Type::Float};
@@ -1335,8 +1378,8 @@ private:
         ASSERT(meta);
 
         const std::size_t count = operation.GetOperandsCount();
-        const bool has_array = meta->sampler.IsArray();
-        const bool has_shadow = meta->sampler.IsShadow();
+        const bool has_array = meta->sampler.is_array;
+        const bool has_shadow = meta->sampler.is_shadow;
 
         std::string expr = "texture" + function_suffix;
         if (!meta->aoffi.empty()) {
@@ -1344,7 +1387,7 @@ private:
         } else if (!meta->ptp.empty()) {
             expr += "Offsets";
         }
-        if (!meta->sampler.IsIndexed()) {
+        if (!meta->sampler.is_indexed) {
             expr += '(' + GetSampler(meta->sampler) + ", ";
         } else {
             expr += '(' + GetSampler(meta->sampler) + '[' + Visit(meta->index).AsUint() + "], ";
@@ -1482,8 +1525,8 @@ private:
         dy += '(';
 
         for (std::size_t index = 0; index < components; ++index) {
-            const auto operand_x{derivates.at(index * 2)};
-            const auto operand_y{derivates.at(index * 2 + 1)};
+            const auto& operand_x{derivates.at(index * 2)};
+            const auto& operand_y{derivates.at(index * 2 + 1)};
             dx += Visit(operand_x).AsFloat();
             dy += Visit(operand_y).AsFloat();
 
@@ -1536,7 +1579,9 @@ private:
         Expression target;
         if (const auto gpr = std::get_if<GprNode>(&*dest)) {
             if (gpr->GetIndex() == Register::ZeroIndex) {
-                // Writing to Register::ZeroIndex is a no op
+                // Writing to Register::ZeroIndex is a no op but we still have to visit the source
+                // as it might have side effects.
+                code.AddLine("{};", Visit(src).GetCode());
                 return {};
             }
             target = {GetRegister(gpr->GetIndex()), Type::Float};
@@ -1819,15 +1864,17 @@ private:
     }
 
     Expression HMergeH0(Operation operation) {
-        std::string dest = VisitOperand(operation, 0).AsUint();
-        std::string src = VisitOperand(operation, 1).AsUint();
-        return {fmt::format("(({} & 0x0000FFFFU) | ({} & 0xFFFF0000U))", src, dest), Type::Uint};
+        const std::string dest = VisitOperand(operation, 0).AsUint();
+        const std::string src = VisitOperand(operation, 1).AsUint();
+        return {fmt::format("vec2(unpackHalf2x16({}).x, unpackHalf2x16({}).y)", src, dest),
+                Type::HalfFloat};
     }
 
     Expression HMergeH1(Operation operation) {
-        std::string dest = VisitOperand(operation, 0).AsUint();
-        std::string src = VisitOperand(operation, 1).AsUint();
-        return {fmt::format("(({} & 0x0000FFFFU) | ({} & 0xFFFF0000U))", dest, src), Type::Uint};
+        const std::string dest = VisitOperand(operation, 0).AsUint();
+        const std::string src = VisitOperand(operation, 1).AsUint();
+        return {fmt::format("vec2(unpackHalf2x16({}).x, unpackHalf2x16({}).y)", dest, src),
+                Type::HalfFloat};
     }
 
     Expression HPack2(Operation operation) {
@@ -1836,34 +1883,48 @@ private:
                 Type::HalfFloat};
     }
 
-    template <Type type>
-    Expression LogicalLessThan(Operation operation) {
-        return GenerateBinaryInfix(operation, "<", Type::Bool, type, type);
+    template <const std::string_view& op, Type type, bool unordered = false>
+    Expression Comparison(Operation operation) {
+        static_assert(!unordered || type == Type::Float);
+
+        const Expression expr = GenerateBinaryInfix(operation, op, Type::Bool, type, type);
+
+        if constexpr (op.compare("!=") == 0 && type == Type::Float && !unordered) {
+            // GLSL's operator!=(float, float) doesn't seem be ordered. This happens on both AMD's
+            // and Nvidia's proprietary stacks. Manually force an ordered comparison.
+            return {fmt::format("({} && !isnan({}) && !isnan({}))", expr.AsBool(),
+                                VisitOperand(operation, 0).AsFloat(),
+                                VisitOperand(operation, 1).AsFloat()),
+                    Type::Bool};
+        }
+        if constexpr (!unordered) {
+            return expr;
+        }
+        // Unordered comparisons are always true for NaN operands.
+        return {fmt::format("({} || isnan({}) || isnan({}))", expr.AsBool(),
+                            VisitOperand(operation, 0).AsFloat(),
+                            VisitOperand(operation, 1).AsFloat()),
+                Type::Bool};
     }
 
-    template <Type type>
-    Expression LogicalEqual(Operation operation) {
-        return GenerateBinaryInfix(operation, "==", Type::Bool, type, type);
+    Expression FOrdered(Operation operation) {
+        return {fmt::format("(!isnan({}) && !isnan({}))", VisitOperand(operation, 0).AsFloat(),
+                            VisitOperand(operation, 1).AsFloat()),
+                Type::Bool};
     }
 
-    template <Type type>
-    Expression LogicalLessEqual(Operation operation) {
-        return GenerateBinaryInfix(operation, "<=", Type::Bool, type, type);
+    Expression FUnordered(Operation operation) {
+        return {fmt::format("(isnan({}) || isnan({}))", VisitOperand(operation, 0).AsFloat(),
+                            VisitOperand(operation, 1).AsFloat()),
+                Type::Bool};
     }
 
-    template <Type type>
-    Expression LogicalGreaterThan(Operation operation) {
-        return GenerateBinaryInfix(operation, ">", Type::Bool, type, type);
-    }
-
-    template <Type type>
-    Expression LogicalNotEqual(Operation operation) {
-        return GenerateBinaryInfix(operation, "!=", Type::Bool, type, type);
-    }
-
-    template <Type type>
-    Expression LogicalGreaterEqual(Operation operation) {
-        return GenerateBinaryInfix(operation, ">=", Type::Bool, type, type);
+    Expression LogicalAddCarry(Operation operation) {
+        const std::string carry = code.GenerateTemporary();
+        code.AddLine("uint {};", carry);
+        code.AddLine("uaddCarry({}, {}, {});", VisitOperand(operation, 0).AsUint(),
+                     VisitOperand(operation, 1).AsUint(), carry);
+        return {fmt::format("({} != 0)", carry), Type::Bool};
     }
 
     Expression LogicalFIsNan(Operation operation) {
@@ -1970,7 +2031,7 @@ private:
 
         std::string expr = GenerateTexture(
             operation, "", {TextureOffset{}, TextureArgument{Type::Float, meta->bias}});
-        if (meta->sampler.IsShadow()) {
+        if (meta->sampler.is_shadow) {
             expr = "vec4(" + expr + ')';
         }
         return {expr + GetSwizzle(meta->element), Type::Float};
@@ -1982,7 +2043,7 @@ private:
 
         std::string expr = GenerateTexture(
             operation, "Lod", {TextureArgument{Type::Float, meta->lod}, TextureOffset{}});
-        if (meta->sampler.IsShadow()) {
+        if (meta->sampler.is_shadow) {
             expr = "vec4(" + expr + ')';
         }
         return {expr + GetSwizzle(meta->element), Type::Float};
@@ -1991,11 +2052,11 @@ private:
     Expression TextureGather(Operation operation) {
         const auto& meta = std::get<MetaTexture>(operation.GetMeta());
 
-        const auto type = meta.sampler.IsShadow() ? Type::Float : Type::Int;
-        const bool separate_dc = meta.sampler.IsShadow();
+        const auto type = meta.sampler.is_shadow ? Type::Float : Type::Int;
+        const bool separate_dc = meta.sampler.is_shadow;
 
         std::vector<TextureIR> ir;
-        if (meta.sampler.IsShadow()) {
+        if (meta.sampler.is_shadow) {
             ir = {TextureOffset{}};
         } else {
             ir = {TextureOffset{}, TextureArgument{type, meta.component}};
@@ -2040,7 +2101,7 @@ private:
         constexpr std::array constructors = {"int", "ivec2", "ivec3", "ivec4"};
         const auto meta = std::get_if<MetaTexture>(&operation.GetMeta());
         ASSERT(meta);
-        UNIMPLEMENTED_IF(meta->sampler.IsArray());
+        UNIMPLEMENTED_IF(meta->sampler.is_array);
         const std::size_t count = operation.GetOperandsCount();
 
         std::string expr = "texelFetch(";
@@ -2061,7 +2122,7 @@ private:
         }
         expr += ')';
 
-        if (meta->lod && !meta->sampler.IsBuffer()) {
+        if (meta->lod && !meta->sampler.is_buffer) {
             expr += ", ";
             expr += Visit(meta->lod).AsInt();
         }
@@ -2072,12 +2133,10 @@ private:
     }
 
     Expression TextureGradient(Operation operation) {
-        const auto meta = std::get_if<MetaTexture>(&operation.GetMeta());
-        ASSERT(meta);
-
+        const auto& meta = std::get<MetaTexture>(operation.GetMeta());
         std::string expr =
             GenerateTexture(operation, "Grad", {TextureDerivates{}, TextureOffset{}});
-        return {std::move(expr) + GetSwizzle(meta->element), Type::Float};
+        return {std::move(expr) + GetSwizzle(meta.element), Type::Float};
     }
 
     Expression ImageLoad(Operation operation) {
@@ -2117,8 +2176,14 @@ private:
             return {};
         }
         return {fmt::format("atomic{}({}, {})", opname, Visit(operation[0]).GetCode(),
-                            Visit(operation[1]).As(type)),
-                type};
+                            Visit(operation[1]).AsUint()),
+                Type::Uint};
+    }
+
+    template <const std::string_view& opname, Type type>
+    Expression Reduce(Operation operation) {
+        code.AddLine("{};", Atomic<opname, type>(operation).GetCode());
+        return {};
     }
 
     Expression Branch(Operation operation) {
@@ -2287,6 +2352,18 @@ private:
         return {"gl_SubGroupInvocationARB", Type::Uint};
     }
 
+    template <const std::string_view& comparison>
+    Expression ThreadMask(Operation) {
+        if (device.HasWarpIntrinsics()) {
+            return {fmt::format("gl_Thread{}MaskNV", comparison), Type::Uint};
+        }
+        if (device.HasShaderBallot()) {
+            return {fmt::format("uint(gl_SubGroup{}MaskARB)", comparison), Type::Uint};
+        }
+        LOG_ERROR(Render_OpenGL, "Thread mask intrinsics are required by the shader");
+        return {"0U", Type::Uint};
+    }
+
     Expression ShuffleIndexed(Operation operation) {
         std::string value = VisitOperand(operation, 0).AsFloat();
 
@@ -2299,7 +2376,21 @@ private:
         return {fmt::format("readInvocationARB({}, {})", value, index), Type::Float};
     }
 
-    Expression MemoryBarrierGL(Operation) {
+    Expression Barrier(Operation) {
+        if (!ir.IsDecompiled()) {
+            LOG_ERROR(Render_OpenGL, "barrier() used but shader is not decompiled");
+            return {};
+        }
+        code.AddLine("barrier();");
+        return {};
+    }
+
+    Expression MemoryBarrierGroup(Operation) {
+        code.AddLine("groupMemoryBarrier();");
+        return {};
+    }
+
+    Expression MemoryBarrierGlobal(Operation) {
         code.AddLine("memoryBarrier();");
         return {};
     }
@@ -2307,6 +2398,19 @@ private:
     struct Func final {
         Func() = delete;
         ~Func() = delete;
+
+        static constexpr std::string_view LessThan = "<";
+        static constexpr std::string_view Equal = "==";
+        static constexpr std::string_view LessEqual = "<=";
+        static constexpr std::string_view GreaterThan = ">";
+        static constexpr std::string_view NotEqual = "!=";
+        static constexpr std::string_view GreaterEqual = ">=";
+
+        static constexpr std::string_view Eq = "Eq";
+        static constexpr std::string_view Ge = "Ge";
+        static constexpr std::string_view Gt = "Gt";
+        static constexpr std::string_view Le = "Le";
+        static constexpr std::string_view Lt = "Lt";
 
         static constexpr std::string_view Add = "Add";
         static constexpr std::string_view Min = "Min";
@@ -2409,27 +2513,36 @@ private:
         &GLSLDecompiler::LogicalPick2,
         &GLSLDecompiler::LogicalAnd2,
 
-        &GLSLDecompiler::LogicalLessThan<Type::Float>,
-        &GLSLDecompiler::LogicalEqual<Type::Float>,
-        &GLSLDecompiler::LogicalLessEqual<Type::Float>,
-        &GLSLDecompiler::LogicalGreaterThan<Type::Float>,
-        &GLSLDecompiler::LogicalNotEqual<Type::Float>,
-        &GLSLDecompiler::LogicalGreaterEqual<Type::Float>,
-        &GLSLDecompiler::LogicalFIsNan,
+        &GLSLDecompiler::Comparison<Func::LessThan, Type::Float, false>,
+        &GLSLDecompiler::Comparison<Func::Equal, Type::Float, false>,
+        &GLSLDecompiler::Comparison<Func::LessEqual, Type::Float, false>,
+        &GLSLDecompiler::Comparison<Func::GreaterThan, Type::Float, false>,
+        &GLSLDecompiler::Comparison<Func::NotEqual, Type::Float, false>,
+        &GLSLDecompiler::Comparison<Func::GreaterEqual, Type::Float, false>,
+        &GLSLDecompiler::FOrdered,
+        &GLSLDecompiler::FUnordered,
+        &GLSLDecompiler::Comparison<Func::LessThan, Type::Float, true>,
+        &GLSLDecompiler::Comparison<Func::Equal, Type::Float, true>,
+        &GLSLDecompiler::Comparison<Func::LessEqual, Type::Float, true>,
+        &GLSLDecompiler::Comparison<Func::GreaterThan, Type::Float, true>,
+        &GLSLDecompiler::Comparison<Func::NotEqual, Type::Float, true>,
+        &GLSLDecompiler::Comparison<Func::GreaterEqual, Type::Float, true>,
 
-        &GLSLDecompiler::LogicalLessThan<Type::Int>,
-        &GLSLDecompiler::LogicalEqual<Type::Int>,
-        &GLSLDecompiler::LogicalLessEqual<Type::Int>,
-        &GLSLDecompiler::LogicalGreaterThan<Type::Int>,
-        &GLSLDecompiler::LogicalNotEqual<Type::Int>,
-        &GLSLDecompiler::LogicalGreaterEqual<Type::Int>,
+        &GLSLDecompiler::Comparison<Func::LessThan, Type::Int>,
+        &GLSLDecompiler::Comparison<Func::Equal, Type::Int>,
+        &GLSLDecompiler::Comparison<Func::LessEqual, Type::Int>,
+        &GLSLDecompiler::Comparison<Func::GreaterThan, Type::Int>,
+        &GLSLDecompiler::Comparison<Func::NotEqual, Type::Int>,
+        &GLSLDecompiler::Comparison<Func::GreaterEqual, Type::Int>,
 
-        &GLSLDecompiler::LogicalLessThan<Type::Uint>,
-        &GLSLDecompiler::LogicalEqual<Type::Uint>,
-        &GLSLDecompiler::LogicalLessEqual<Type::Uint>,
-        &GLSLDecompiler::LogicalGreaterThan<Type::Uint>,
-        &GLSLDecompiler::LogicalNotEqual<Type::Uint>,
-        &GLSLDecompiler::LogicalGreaterEqual<Type::Uint>,
+        &GLSLDecompiler::Comparison<Func::LessThan, Type::Uint>,
+        &GLSLDecompiler::Comparison<Func::Equal, Type::Uint>,
+        &GLSLDecompiler::Comparison<Func::LessEqual, Type::Uint>,
+        &GLSLDecompiler::Comparison<Func::GreaterThan, Type::Uint>,
+        &GLSLDecompiler::Comparison<Func::NotEqual, Type::Uint>,
+        &GLSLDecompiler::Comparison<Func::GreaterEqual, Type::Uint>,
+
+        &GLSLDecompiler::LogicalAddCarry,
 
         &GLSLDecompiler::Logical2HLessThan<false>,
         &GLSLDecompiler::Logical2HEqual<false>,
@@ -2477,6 +2590,20 @@ private:
         &GLSLDecompiler::Atomic<Func::Or, Type::Int>,
         &GLSLDecompiler::Atomic<Func::Xor, Type::Int>,
 
+        &GLSLDecompiler::Reduce<Func::Add, Type::Uint>,
+        &GLSLDecompiler::Reduce<Func::Min, Type::Uint>,
+        &GLSLDecompiler::Reduce<Func::Max, Type::Uint>,
+        &GLSLDecompiler::Reduce<Func::And, Type::Uint>,
+        &GLSLDecompiler::Reduce<Func::Or, Type::Uint>,
+        &GLSLDecompiler::Reduce<Func::Xor, Type::Uint>,
+
+        &GLSLDecompiler::Reduce<Func::Add, Type::Int>,
+        &GLSLDecompiler::Reduce<Func::Min, Type::Int>,
+        &GLSLDecompiler::Reduce<Func::Max, Type::Int>,
+        &GLSLDecompiler::Reduce<Func::And, Type::Int>,
+        &GLSLDecompiler::Reduce<Func::Or, Type::Int>,
+        &GLSLDecompiler::Reduce<Func::Xor, Type::Int>,
+
         &GLSLDecompiler::Branch,
         &GLSLDecompiler::BranchIndirect,
         &GLSLDecompiler::PushFlowStack,
@@ -2502,9 +2629,16 @@ private:
         &GLSLDecompiler::VoteEqual,
 
         &GLSLDecompiler::ThreadId,
+        &GLSLDecompiler::ThreadMask<Func::Eq>,
+        &GLSLDecompiler::ThreadMask<Func::Ge>,
+        &GLSLDecompiler::ThreadMask<Func::Gt>,
+        &GLSLDecompiler::ThreadMask<Func::Le>,
+        &GLSLDecompiler::ThreadMask<Func::Lt>,
         &GLSLDecompiler::ShuffleIndexed,
 
-        &GLSLDecompiler::MemoryBarrierGL,
+        &GLSLDecompiler::Barrier,
+        &GLSLDecompiler::MemoryBarrierGroup,
+        &GLSLDecompiler::MemoryBarrierGlobal,
     };
     static_assert(operation_decompilers.size() == static_cast<std::size_t>(OperationCode::Amount));
 
@@ -2574,11 +2708,11 @@ private:
     }
 
     std::string GetSampler(const Sampler& sampler) const {
-        return AppendSuffix(static_cast<u32>(sampler.GetIndex()), "sampler");
+        return AppendSuffix(sampler.index, "sampler");
     }
 
     std::string GetImage(const Image& image) const {
-        return AppendSuffix(static_cast<u32>(image.GetIndex()), "image");
+        return AppendSuffix(image.index, "image");
     }
 
     std::string AppendSuffix(u32 index, std::string_view name) const {
@@ -2617,6 +2751,7 @@ private:
     const std::string_view identifier;
     const std::string_view suffix;
     const Header header;
+    const bool use_unified_uniforms;
     std::unordered_map<u8, VaryingTFB> transform_feedback;
 
     ShaderWriter code;
@@ -2812,7 +2947,7 @@ void GLSLDecompiler::DecompileAST() {
 
 } // Anonymous namespace
 
-ShaderEntries MakeEntries(const VideoCommon::Shader::ShaderIR& ir) {
+ShaderEntries MakeEntries(const Device& device, const ShaderIR& ir, ShaderType stage) {
     ShaderEntries entries;
     for (const auto& cbuf : ir.GetConstantBuffers()) {
         entries.const_buffers.emplace_back(cbuf.second.GetMaxOffset(), cbuf.second.IsIndirect(),
@@ -2833,6 +2968,7 @@ ShaderEntries MakeEntries(const VideoCommon::Shader::ShaderIR& ir) {
         entries.clip_distances = (clip_distances[i] ? 1U : 0U) << i;
     }
     entries.shader_length = ir.GetLength();
+    entries.use_unified_uniforms = UseUnifiedUniforms(device, ir, stage);
     return entries;
 }
 

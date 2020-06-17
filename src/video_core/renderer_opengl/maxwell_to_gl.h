@@ -191,6 +191,7 @@ inline GLenum TextureFilterMode(Tegra::Texture::TextureFilter filter_mode,
         case Tegra::Texture::TextureMipmapFilter::Linear:
             return GL_LINEAR_MIPMAP_LINEAR;
         }
+        break;
     }
     case Tegra::Texture::TextureFilter::Nearest: {
         switch (mip_filter_mode) {
@@ -201,6 +202,7 @@ inline GLenum TextureFilterMode(Tegra::Texture::TextureFilter filter_mode,
         case Tegra::Texture::TextureMipmapFilter::Linear:
             return GL_NEAREST_MIPMAP_LINEAR;
         }
+        break;
     }
     }
     LOG_ERROR(Render_OpenGL, "Unimplemented texture filter mode={}", static_cast<u32>(filter_mode));
@@ -499,6 +501,11 @@ inline GLenum PolygonMode(Maxwell::PolygonMode polygon_mode) {
     }
     UNREACHABLE_MSG("Invalid polygon mode={}", static_cast<int>(polygon_mode));
     return GL_FILL;
+}
+
+inline GLenum ViewportSwizzle(Maxwell::ViewportSwizzle swizzle) {
+    // Enumeration order matches register order. We can convert it arithmetically.
+    return GL_VIEWPORT_SWIZZLE_POSITIVE_X_NV + static_cast<GLenum>(swizzle);
 }
 
 } // namespace MaxwellToGL
